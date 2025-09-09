@@ -1,0 +1,222 @@
+Окей 👍 тогда идём строго по "железным" стандартам, без установки дополнительных пакетов.
+На чистом Linux (и большинстве роутеров Cisco/Mikrotik/Juniper) из коробки есть два базовых механизма:
+
+
+---
+
+📌 VPN без дополнительных пакетов
+
+1. IPsec (XFRM + setkey) — встроенный в ядро Linux
+
+Linux ядро имеет встроенный стек IPsec (через подсистему XFRM).
+Использовать можно команду ip xfrm (новый метод) или setkey (старый метод, через ipsec-tools — но это пакет, так что оставим только ip xfrm).
+
+Пример: защищённый канал между DC-RTR и MSK-RTR
+
+# Очистить старые политики
+ip xfrm state flush
+ip xfrm policy flush
+
+# Настроить ключи и политики (симметричный PSK)
+# На DC-RTR:
+ip xfrm state add src <DC_RTR_PUBLIC_IP> dst <MSK_RTR_PUBLIC_IP> proto esp spi 0x100 mode tunnel \
+  auth sha256 0x1234567890abcdef1234567890abcdef \
+  enc aes 0xabcdef1234567890abcdef1234567890
+
+ip xfrm state add src <MSK_RTR_PUBLIC_IP> dst <DC_RTR_PUBLIC_IP> proto esp spi 0x200 mode tunnel \
+  auth sha256 0xabcdefabcdefabcdefabcdefabcdef12 \
+  enc aes 0x123456789012345678901234567890ab
+
+ip xfrm policy add src 10.0.0.0/16 dst 192.168.0.0/16 dir out tmpl src <DC_RTR_PUBLIC_IP> dst <MSK_RTR_PUBLIC_IP> proto esp mode tunnel
+ip xfrm policy add src 192.168.0.0/16 dst 10.0.0.0/16 dir in tmpl src <MSK_RTR_PUBLIC_IP> dst <DC_RTR_PUBLIC_IP> proto esp mode tunnel
+
+То же самое зеркально на MSK-RTR (меняются src/dst и SPI/ключи).
+После этого весь трафик между подсетями шифруется на уровне ядра.
+
+
+---
+
+2. GRE туннель (без шифрования, но стандартный)
+
+GRE встроен в ядро Linux, не требует пакетов.
+
+Пример DC-RTR ↔ MSK-RTR
+
+# На DC-RTR
+ip tunnel add gre1 mode gre remote <MSK_RTR_PUBLIC_IP> local <DC_RTR_PUBLIC_IP> ttl 255
+ip addr add 10.10.10.1/30 dev gre1
+ip link set gre1 up
+
+# На MSK-RTR
+ip tunnel add gre1 mode gre remote <DC_RTR_PUBLIC_IP> local <MSK_RTR_PUBLIC_IP> ttl 255
+ip addr add 10.10.10.2/30 dev gre1
+ip link set gre1 up
+
+# Проверка
+ping 10.10.10.1 -c3
+
+
+---
+
+3. GRE + IPsec (рекомендация как крайний вариант)
+
+Можно объединить оба механизма:
+
+1. Поднимаем GRE-туннель (как выше).
+
+
+2. Для его трафика (proto 47) добавляем политику IPsec через ip xfrm.
+
+
+
+Пример:
+
+# Шифруем GRE (proto 47) между роутерами
+ip xfrm state add src <DC_RTR_PUBLIC_IP> dst <MSK_RTR_PUBLIC_IP> proto esp spi 0x300 mode transport \
+  auth sha256 0x1234567890abcdef1234567890abcdef \
+  enc aes 0xabcdefabcdefabcdefabcdefabcdef12
+
+ip xfrm policy add src <DC_RTR_PUBLIC_IP> dst <MSK_RTR_PUBLIC_IP> proto gre dir out tmpl proto esp mode transport
+ip xfrm policy add src <MSK_RTR_PUBLIC_IP> dst <DC_RTR_PUBLIC_IP> proto gre dir in  tmpl proto esp mode transport
+
+
+---
+
+👉 Резюме:
+
+Нативный вариант: ip xfrm (чистый IPsec, встроенный в ядро).
+
+Простой туннель: GRE (но без шифрования).
+
+Комбинированный: GRE + IPsec (шифрование + совместимость с OSPF, multicast).
+
+
+
+---
+
+Хочешь, я соберу тебе готовые конфиги XFRM (IPsec) для трёх узлов (DC-RTR, MSK-RTR, RTR-PROD), чтобы ост
+алось только вставить IP-адреса и ключи?
+
+
+
+Понял 👍
+Раз WireGuard не доступен — предлагаю разобрать два стандартных варианта организации VPN в корпоративной инфраструктуре, а GRE оставить как крайний вариант:
+
+
+---
+
+📌 Варианты VPN без WireGuard
+
+1. IPsec (IKEv2) — стандарт для корпоративных сетей
+
+Самый надёжный и универсальный вариант, поддерживается на Linux, Cisco, Mikrotik и т.п.
+Рекомендую использовать strongSwan на Linux-маршрутизаторах (или встроенные возможности сетевых устройств).
+
+Установка (Debian/Ubuntu):
+
+apt update && apt install -y strongswan strongswan-pki
+
+Пример конфига /etc/ipsec.conf (DC-RTR ↔ MSK-RTR)
+
+config setup
+  charondebug="ike 2, knl 2, cfg 2"
+
+conn dc-msk
+  keyexchange=ikev2
+  auto=start
+  authby=psk
+  left=<DC_RTR_PUBLIC_IP>
+  leftsubnet=10.0.0.0/16
+  right=<MSK_RTR_PUBLIC_IP>
+  rightsubnet=192.168.0.0/16
+  ike=aes256-sha2_256-modp2048
+  esp=aes256-sha2_256
+
+Пример ключа /etc/ipsec.secrets
+
+<DC_RTR_PUBLIC_IP> <MSK_RTR_PUBLIC_IP> : PSK "СложныйПароль123!"
+
+Запуск:
+
+systemctl enable strongswan
+systemctl start strongswan
+ipsec status
+
+
+---
+
+2. OpenConnect (ocserv) — SSL VPN
+
+Если у тебя уже используется OpenConnect (по заданию для удалённых сотрудников через CLOUD-VM1), можно развернуть его и для туннелей между роутерами.
+Минус — не всегда удобно для site-to-site, но рабочий вариант.
+
+Пример конфига /etc/ocserv/ocserv.conf:
+
+auth = "plain[/etc/ocserv/psw-file]"
+tcp-port = 443
+udp-port = 443
+server-cert = /etc/ssl/certs/vpn-cert.pem
+server-key = /etc/ssl/private/vpn-key.pem
+ipv4-network = 10.55.200.0
+ipv4-netmask = 255.255.255.0
+
+Клиент (на MSK-RTR):
+
+openconnect -u cod_admin --passwd-on-stdin <DC_RTR_PUBLIC_IP>
+
+
+---
+
+3. GRE поверх IPsec (крайний вариант)
+
+GRE сам по себе не шифрует трафик, поэтому обязательно поверх него запускать IPsec. Это используется, если нужно передавать не только IP-пакеты (например, multicast, OSPF, нестандартные протоколы).
+
+GRE туннель (Linux):
+
+# На DC-RTR
+ip tunnel add gre1 mode gre remote <MSK_RTR_PUBLIC_IP> local <DC_RTR_PUBLIC_IP> ttl 255
+ip addr add 10.10.10.1/30 dev gre1
+ip link set gre1 up
+
+# На MSK-RTR
+ip tunnel add gre1 mode gre remote <DC_RTR_PUBLIC_IP> local <MSK_RTR_PUBLIC_IP> ttl 255
+ip addr add 10.10.10.2/30 dev gre1
+ip link set gre1 up
+
+# Проверка
+ping 10.10.10.1 -c 3
+
+Защита GRE через IPsec (добавляем в /etc/ipsec.conf):
+
+conn gre-protect
+  keyexchange=ikev2
+  auto=start
+  authby=psk
+  left=<DC_RTR_PUBLIC_IP>
+  right=<MSK_RTR_PUBLIC_IP>
+  type=transport
+  esp=aes256-sha2_256
+
+Таким образом GRE получает шифрование через IPsec.
+
+
+---
+
+👉 Резюме:
+
+Основной вариант: IPsec (IKEv2) через strongSwan — стандарт и поддержка на всех устройствах.
+
+Альтернатива: OpenConnect (если хочешь унифицировать с CLOUD-VM1).
+
+Крайний случай: GRE поверх IPsec (если нужен транспорт мультикаста/OSPF).
+
+
+
+---
+
+Хочешь, я подготовлю готовые конфиги IPsec (IKEv2) именно для трёх узлов — DC-RTR, MSK-RTR и RTR-PROD с прописанными left/rightsubnet, чтобы можно было сразу вставить и запустить?
+
+
+
+
+
