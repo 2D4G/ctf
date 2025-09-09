@@ -1,0 +1,678 @@
+
+1. Файловая структура (рекомендуемая):
+
+/ssh_keys/ — на DC-STORAGE хранится закрытый ключ cod_admin и каталог с публичными ключами целевых машин. (доступ только cod_admin)
+
+/backups/ — директория для локальных бэкапов на DC-STORAGE
+
+/etc/ocserv/ — конфигурация OpenConnect (на CLOUD-VM1)
+
+
+
+2. Переменные (замените на свои):
+
+DC_RTR_IP=<ip_dc_rtr>
+
+MSK_RTR_IP=<ip_msk_rtr>
+
+RTR_PROD_IP=<ip_rtr_prod>
+
+DC_STORAGE=dc-storage.datacenter.local (FQDN или IP)
+
+CLOUD_VM1=<ip_cloud_vm1>
+
+MSK_DC1=<ip_msk_dc1>
+
+MAIL_HOST=mail.datastream.sol (в задании: 10.15.10.100)
+
+OCSERV_POOL=10.55.100.0/24 — пул адресов OpenConnect (пример)
+
+OCSERV_INTERNAL_NET=10.55.100.0/24
+
+SSH_ALLOW_NETS="10.0.0.0/8 192.168.0.0/16" — локальные сети классов A и C (замените по топологии)
+
+
+
+3. Общие правила безопасности
+
+Любые пароли — соответствовать корпоративной политике (минимум 14 символов, смешанные случаи, цифры, символы) — рекомендуется хранить в менеджере паролей (Bitwarden/Passbolt/HashiCorp Vault).
+
+Логи действий и аудита хранить в отдельном репозитории/сервере логов (настройки — за пределами этого файла).
+
+
+
+
+
+---
+
+1. L3-адресация (общая инструкция)
+
+> Задача: на всех устройствах настроить L3-адреса, маршруты и базовую фильтрацию.
+
+
+
+1.1 Linux (iproute2) — пример
+
+# Настроить адрес на интерфейсе
+ip addr add 192.168.1.1/24 dev eth0
+ip link set dev eth0 up
+
+# Добавить маршрут по умолчанию (пример)
+ip route add default via 192.168.1.254 dev eth0
+
+# Сохранение — для Debian/Ubuntu: /etc/network/interfaces.d/ или netplan.
+# Для netplan (Ubuntu >=18.04) пример /etc/netplan/01-netcfg.yaml
+# network:
+#   version: 2
+#   ethernets:
+#     eth0:
+#       dhcp4: no
+#       addresses: [192.168.1.1/24]
+#       gateway4: 192.168.1.254
+
+1.2 Пример на VyOS / Vyatta (если маршрутизаторы на подобной ОС)
+
+configure
+set interfaces ethernet eth0 address 192.168.1.1/24
+set protocols static route 0.0.0.0/0 next-hop 192.168.1.254
+commit; save; exit
+
+1.3 Проверка
+
+ip -4 addr show
+ip -4 route show
+ping -c3 <peer_ip>
+
+
+---
+
+2. SSH — политики и команды
+
+Требования в задании:
+
+Все устройства, кроме DC-STORAGE, разрешают SSH по 22 порту только на интерфейсах в локальных сетях классов A и C (IPv4).
+
+Логин cod_admin, доступ только по ключу (ключ EDCA — см. пояснение ниже).
+
+На DC-STORAGE — ключ EDCA хранится в /ssh_keys, у cod_admin в домашней директории ключей быть не должно.
+
+На DC-STORAGE для пользователей, подключённых через OpenConnect, доступ cod_admin — по паролю.
+
+На всех целевых машинах в ЦОД cod_admin должен иметь sudo без запроса пароля.
+
+
+> Примечание по "EDCA": вероятно, опечатка — обычно рекомендуют ed25519 (EdDSA) или ecdsa. Я рекомендую ed25519 (современно, безопасно и быстро). Если нужен ECDSA — указывайте -t ecdsa -b 521.
+
+
+
+2.1 Генерация ключей (на DC-STORAGE)
+
+# Создать каталог для ключей и задать права
+sudo mkdir -p /ssh_keys/cod_admin
+sudo chown cod_admin:cod_admin /ssh_keys/cod_admin
+sudo chmod 700 /ssh_keys/cod_admin
+
+# Сгенерировать ed25519 ключ (рекомендовано)
+sudo -u cod_admin ssh-keygen -t ed25519 -f /ssh_keys/cod_admin/id_ed25519 -C "cod_admin@datastream" -N ""
+
+# Права
+sudo chmod 600 /ssh_keys/cod_admin/id_ed25519
+sudo chmod 644 /ssh_keys/cod_admin/id_ed25519.pub
+
+Если ваша политика требует ECDSA: ssh-keygen -t ecdsa -b 521 -f /ssh_keys/cod_admin/id_ecdsa
+
+2.2 Развертывание публичного ключа на хостах (пример)
+
+# На DC-STORAGE: скопировать публичный ключ на целевой хост (замените адрес/пользователя)
+ssh-copy-id -i /ssh_keys/cod_admin/id_ed25519.pub root@<target_host>
+
+# Или вручную положить в /home/cod_admin/.ssh/authorized_keys и удалить любые ключи из домашней директории cod_admin
+ssh root@<target_host> 'mkdir -p /ssh_keys && chown cod_admin:cod_admin /ssh_keys; mkdir -p /home/cod_admin/.ssh && mv /home/cod_admin/.ssh/authorized_keys /home/cod_admin/.ssh/authorized_keys.bak'
+# затем добавить ключ как root в /ssh_keys/cod_admin/authorized_keys на целевой
+
+> ВАЖНО: у cod_admin в домашней директории НЕЛЬЗЯ хранить ключи (требование). Используем /ssh_keys.
+
+
+
+2.3 Пример /etc/ssh/sshd_config (шаблон)
+
+# Общие безопасные настройки
+Port 22
+Protocol 2
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+
+# Ограничить, на каких адресах слушать (замените на реальные L3-адреса интерфейсов в локальных сетях)
+ListenAddress 10.0.1.1
+ListenAddress 192.168.1.1
+
+# Используем ключи из /ssh_keys для cod_admin
+AuthorizedKeysFile /ssh_keys/%u/authorized_keys
+
+# Разрешить password только на DC-STORAGE и только для адресов внутри пула OpenConnect
+Match Address 10.55.100.0/24
+    PasswordAuthentication yes
+
+# После Match block вернуть общие правила
+Match all
+    PasswordAuthentication no
+
+2.4 Sudo для cod_admin (без пароля) — на машинах ЦОД
+
+# На каждой целевой машине (либо через конфиг-менеджер)
+echo 'cod_admin ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/99-cod_admin
+sudo chmod 440 /etc/sudoers.d/99-cod_admin
+
+Документируйте какие параметры SSH использовали (в отчёте указать: PermitRootLogin no, PubkeyAuthentication yes, PasswordAuthentication no, AuthorizedKeysFile /ssh_keys/%u/authorized_keys, использование Match Address для исключений).
+
+
+---
+
+3. VPN (между DC-RTR, MSK-RTR, RTR-PROD) — защищённые туннели
+
+Выбор решения: предлагаю WireGuard (быстро, современно, лёгок в сопровождении). Альтернатива — strongSwan (IKEv2) для совместимости с традиционными FW/CPE. Ниже — пример WireGuard и общие рекомендации.
+
+3.1 Генерация ключей и базовая настройка WireGuard (на каждом роутере)
+
+# Установка на Linux (Debian/Ubuntu)
+apt update && apt install -y wireguard iproute2
+
+# На каждом узле
+wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+chmod 600 /etc/wireguard/privatekey
+
+3.2 Пример конфигурации /etc/wireguard/wg0.conf для DC-RTR
+
+[Interface]
+Address = 10.200.0.1/24   # внутренний туннельный адрес
+PrivateKey = <dc_privatekey>
+ListenPort = 51820
+
+# Peer: MSK-RTR
+[Peer]
+PublicKey = <msk_pubkey>
+Endpoint = <msk_rtr_public_ip>:51820
+AllowedIPs = 10.200.0.2/32, 10.0.0.0/8  # только необходимые сети
+PersistentKeepalive = 25
+
+# Peer: RTR-PROD
+[Peer]
+PublicKey = <prod_pubkey>
+Endpoint = <prod_rtr_public_ip>:51820
+AllowedIPs = 10.200.0.3/32
+
+Важно: AllowedIPs — строго по Топологии VPN; не добавляйте доп. сети. Используйте single interface wg0.
+
+3.3 Запуск и автозагрузка
+
+systemctl enable wg-quick@wg0
+systemctl start wg-quick@wg0
+
+3.4 Проверка доступности почтового сервиса (использовать для мониторинга туннеля)
+
+# Проверка SMTP (25) или submission (587)
+nc -zv mail.datastream.sol 25 || echo "mail unreachable" && systemctl restart wg-quick@wg0
+
+# или NOHUP-скрипт/monit, prometheus exporter — по усмотрению
+
+
+---
+
+4. PAT (NAT) для выхода в Интернет
+
+Реализация: на роутерах, выходящих в Интернет, настроить маскарадинг (пример на Linux с iptables)
+
+# Допустим внешний интерфейс называется eth0
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+# Сохранить правила
+apt install -y iptables-persistent
+netfilter-persistent save
+
+Или в nftables:
+
+nft add table nat
+nft 'add chain nat postrouting { type nat hook postrouting priority 100 ; }'
+nft add rule nat postrouting oifname "eth0" masquerade
+
+
+---
+
+5. Резервное копирование (backup)
+
+Требования: ежедневный бэкап в 02:00; основное хранилище - DC-STORAGE; резервное — MSK-DC1; полная неделя, инкрементально ежедневно; срок хранения 30 дней; доступ к копиям только cod_admin по ключу; передача между DC по зашифрованному каналу (scp/rsync через VPN); ежемесячная проверка восстановления.
+
+5.1 Выбор средства
+
+Рекомендация: restic (простота, шифрование по умолчанию, хранение snapshot'ов и политика forget/prune). Альтернатива: borgbackup.
+
+5.2 Установка restic
+
+# Debian/Ubuntu
+apt update && apt install -y restic
+
+5.3 Инициализация репозитория (локально на DC-STORAGE)
+
+# Создать директорию для репо
+sudo mkdir -p /backups/restic-repo
+sudo chown cod_admin:cod_admin /backups/restic-repo
+
+# Инициализация (используем локальный репозиторий; можно и SFTP)
+sudo -u cod_admin restic -r /backups/restic-repo init
+
+5.4 Скрипты бэкапа
+
+/usr/local/bin/backup_daily.sh:
+
+#!/bin/bash
+export RESTIC_REPOSITORY=/backups/restic-repo
+# RESTIC_PASSWORD должен быть доступен только cod_admin (файл /etc/restic-pass или systemd secret)
+export RESTIC_PASSWORD_FILE=/etc/restic/passwd
+
+# Дневной инкрементальный
+restic backup /etc /var/lib /home/cod_admin --tag daily
+
+# Если день недели воскресенье — запустить полный (фактически restic делает снимок, мы помечаем тегом full)
+if [ "$(date +%u)" = "7" ]; then
+  restic backup /etc /var/lib /home/cod_admin --tag weekly-full
+fi
+
+# Применить политику хранения: сохраняем 30 дней (пример политики)
+restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 1
+
+chmod +x /usr/local/bin/backup_daily.sh
+
+5.5 Планировщик (systemd timer)
+
+Создать unit /etc/systemd/system/backup_daily.service и /etc/systemd/system/backup_daily.timer — таймер запускающийся в 02:00 ежедневно.
+
+backup_daily.timer (коротко):
+
+[Unit]
+Description=Daily backup timer
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+systemctl enable --now backup_daily.timer
+
+5.6 Репликация на MSK-DC1
+
+# Репликация репозитория (через rsync по VPN):
+# На DC-STORAGE
+rsync -avz -e "ssh -i /ssh_keys/cod_admin/id_ed25519 -o StrictHostKeyChecking=no" /backups/restic-repo/ cod_admin@${MSK_DC1}:/backups/restic-repo/
+
+# В crontab или как step в backup_daily.sh после успешного создания snapshot
+
+5.7 Ограничение доступа
+
+# Доступ к /backups только cod_admin
+chown -R cod_admin:cod_admin /backups
+chmod -R 700 /backups
+
+# Следите чтобы приватный ключ хранился только на DC-STORAGE
+chmod 600 /ssh_keys/cod_admin/id_ed25519
+
+5.8 Проверка восстановления (ежемесячно)
+
+/usr/local/bin/backup_restore_test.sh — тестовый скрипт, который делает restic restore <latest_snapshot> --target /tmp/restore_test и проводит quick checksum / проверку целостности.
+
+
+---
+
+6. OpenConnect (CLOUD-VM1) — брокер подключений
+
+Задача: CLOUD-VM1 — публичный брокер; не публикуем адреса роутеров ЦОД. OpenConnect (ocserv) позволяет per-user / per-group конфигурацию, поэтому на основе логина можно давать разные маршруты.
+
+6.1 Установка ocserv
+
+apt update && apt install -y ocserv
+# Создать директории для per-user и per-group
+mkdir -p /etc/ocserv/config-per-user /etc/ocserv/config-per-group
+chown root:root /etc/ocserv/config-per-user /etc/ocserv/config-per-group
+
+6.2 Пример конфигурации (основные опции в /etc/ocserv/ocserv.conf)
+
+# слушать на 443
+tcp-port = 443
+udp-port = 443
+
+# Pool для VPN клиентов (пример; обязательно выбрать не пересекающийся с LAN)
+ipv4-network = 10.55.100.0
+ipv4-netmask = 255.255.255.0
+
+# DNS для VPN клиентов
+dns = 10.15.10.2
+
+# Включить per-user/group config
+config-per-user = /etc/ocserv/config-per-user/
+config-per-group = /etc/ocserv/config-per-group/
+
+# Прочее: режим TLS, сертификат, ключ
+server-cert = /etc/ssl/certs/ocserv-cert.pem
+server-key = /etc/ssl/private/ocserv-key.pem
+
+# Ограничение числа сессий, тайлы и т.п. по вкусу
+
+6.3 Пер-юзер / пер-групп настройки (пример)
+
+/etc/ocserv/config-per-user/cod_admin:
+
+# cod_admin получает маршруты к сети ЦОД
+route = 10.10.0.0/255.255.0.0
+route = 10.15.10.0/255.255.255.0
+tunnel-all-dns = false
+
+/etc/ocserv/config-per-user/cloud_admin:
+
+# облачная сеть только
+route = 172.16.200.0/255.255.255.0
+
+/etc/ocserv/config-per-user/msk_admin:
+
+route = 192.168.2.0/255.255.255.0
+
+6.4 Аутентификация
+
+Можно использовать LDAP/FreeIPA/RADIUS для централизованной авторизации. Для простоты — PAM/Local + жесткий пароль или сертификаты.
+
+Важно: убедиться, что cod_admin при подключении получает возможность SSH по паролю на DC-STORAGE (см. sshd Match Address с пулом OpenConnect).
+
+
+
+---
+
+7. Клиентский REMOTE-TERMINAL — OpenConnect-client
+
+Описание: клиент подключается к CLOUD-VM1; в зависимости от логина получает доступы.
+
+Пример команды подключения на клиенте (linux):
+
+# interactive
+sudo openconnect --user=cod_admin https://<CLOUD_VM1>
+# или non-interactive
+echo 'password' | sudo openconnect --user=cod_admin --passwd-on-stdin https://<CLOUD_VM1>
+
+Для автоматизации — можно настроить NetworkManager или systemd unit с конфигом.
+
+
+---
+
+8. Работы в Москве — FreeIPA, пользователи, политики
+
+8.1 Развернуть FreeIPA на MSK-DC1
+
+# Пример для RHEL/CentOS/Alma/Ubuntu (пакет может отличаться)
+# Установка
+apt install -y freeipa-server
+# Инициализация (интерактивно или с флагами)
+ipa-server-install --realm=DATASTREAM.SOL --domain=datastream.sol --ds-password='<DirectoryManagerPwd>' --admin-password='<AdminPwd>' --setup-dns
+
+# После установки — проверьте DNS записи, при необходимости добавьте вручную
+
+DNS-записи (взято из ТЗ):
+
+www.datastream.sol = 192.168.2.1
+
+gitlab.datastream.sol = 192.168.1.3
+
+mail.datastream.sol = 10.15.10.100
+
+
+8.2 Импорт пользователей из /root/users.csv
+
+Формат CSV (рекомендуем): login,firstname,lastname,email,groups — адаптируйте под ваш файл.
+
+Пример скрипта (bash) для импорта и установки флага "не требовать смены пароля":
+
+#!/bin/bash
+CSV=/root/users.csv
+while IFS=, read -r login first last email groups; do
+  # добавить пользователя
+  ipa user-add "$login" --first="$first" --last="$last" --email="$email" --random
+  # отключить требование смены пароля
+  ipa pwpolicy-mod --user=$login --setattr krbPasswordExpiration=0 || true
+  # добавить в группы, если указаны
+  for g in $(echo "$groups" | tr ';' ' '); do
+    [ -z "$g" ] && continue
+    ipa group-add-member "$g" --users="$login" || true
+  done
+done < <(tail -n +1 $CSV)
+
+> Примечание: ipa user-add не принимает флаг для "без смены пароля" напрямую; можно использовать --setattr или вручную сбросить политику пароля. Тестируйте сценарий на стенде прежде чем запускать в прод.
+
+
+
+8.3 Добавление машин в домен (пример для клиента Linux)
+
+# На MSK-ADMINPC / MSK-WORKER
+apt install -y freeipa-client
+ipa-client-install --mkhomedir --server=msk-dc1.datastream.sol --domain=datastream.sol --force
+
+8.4 Ограничение времени работы на MSK-WORKER (09:00–18:00 MCK)
+
+Вариант (наиболее надёжный без кастомных расширений FreeIPA): использовать PAM-модуль pam_time.so.
+
+1. В /etc/security/time.conf добавить правило (пример):
+
+
+
+# Формат: services;ttys;users;times
+login ; tty* ; @DOMAIN\\users ; Wk0900-1800
+
+2. В /etc/pam.d/common-auth (или соответствующем файле) добавить строку:
+
+
+
+account required pam_time.so
+
+3. Исключение для локального administrator (локальный пользователь) — разрешить явно в time.conf:
+
+
+
+login ; tty* ; administrator ; Al0000-2400
+
+> Если используете SSSD и доменные учётные записи, убедитесь что pam конфигурация на клиенте применяет pam_time и SSSD карту для доменных пользователей.
+
+
+
+Альтернатива: в FreeIPA можно попытаться использовать HBAC и кастомные правила времени (но это сложнее в настройке). Для простоты и предсказуемости — pam_time на клиенте.
+
+8.5 Сообщение на экране блокировки
+
+GNOME (пример):
+
+# Установить текст для экрана входа (для GDM/gnome-shell)
+sudo -u root mkdir -p /etc/dconf/db/local.d
+cat <<EOF | sudo tee /etc/dconf/db/local.d/01-lock-msg
+[org/gnome/login-screen]
+banner-message-enable=true
+banner-message-text='В случае необходимости доступа к рабочему месту вне регламентированных работ, напишите на почту - admin@datastream.sol'
+EOF
+sudo dconf update
+
+*Если используется другой DE — настройка и ключи могут отличаться. Можно также заменить фон/изображение с подписью (gsettings для org.gnome.desktop.screensaver).
+
+8.6 MSK-ADMINPC — доступ только для группы IT + sudo через пароль для этой группы
+
+1. Создать группу IT в FreeIPA / локально и добавить пользователей.
+
+
+2. SSH: в /etc/ssh/sshd_config добавить AllowGroups IT (это ограничит SSH).
+
+
+
+# sshd_config
+AllowGroups IT
+
+3. Локальные консоли: добавить проверку в PAM или настроить /etc/security/access.conf чтобы запретить вход для не-IT.
+
+
+4. Настроить sudo (парольная авторизация):
+
+
+
+# /etc/sudoers.d/it_group
+%IT ALL=(ALL) ALL
+chmod 440 /etc/sudoers.d/it_group
+
+
+---
+
+9. DHCP (MSK-RTR)
+
+Требование: диапазон 192.168.1.50-192.168.1.100; DNS: 192.168.1.2 и 77.88.8.1; домен поиска datastream.sol.
+
+9.1 ISC DHCP сервер — пример dhcpd.conf
+
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+
+subnet 192.168.1.0 netmask 255.255.255.0 {
+  range 192.168.1.50 192.168.1.100;
+  option domain-name-servers 192.168.1.2, 77.88.8.1;
+  option domain-name "datastream.sol";
+  option routers 192.168.1.1;
+}
+
+9.2 Запуск
+
+apt install -y isc-dhcp-server
+# Поместите dhcpd.conf в /etc/dhcp/dhcpd.conf
+systemctl enable --now isc-dhcp-server
+
+
+---
+
+10. Облако — GitLab, Registry, Runner, CI/CD
+
+10.1 GitLab + Registry (рекомендация: Omnibus или docker-compose)
+
+Быстрый путь (docker-compose):
+
+docker-compose.yml (упрощённый пример с GitLab CE + Registry встроенным в Omnibus — обычно проще ставить Omnibus пакетом):
+
+version: '3'
+services:
+  gitlab:
+    image: 'gitlab/gitlab-ee:latest'
+    restart: always
+    hostname: 'gitlab.datastream.sol'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'https://gitlab.datastream.sol'
+        gitlab_rails['registry_enabled'] = true
+        gitlab_rails['registry_host'] = "registry.datastream.sol"
+    ports:
+      - '80:80'
+      - '443:443'
+      - '22:22'
+    volumes:
+      - ./config:/etc/gitlab
+      - ./logs:/var/log/gitlab
+      - ./data:/var/opt/gitlab
+
+> Подробная настройка Registry в Omnibus описана в документации GitLab.
+
+
+
+10.2 Runner — регистрация (пример)
+
+# Установить gitlab-runner
+curl -L --output /usr/local/bin/gitlab-runner https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64
+chmod +x /usr/local/bin/gitlab-runner
+
+# Регистрация
+gitlab-runner register --non-interactive \
+  --url "https://gitlab.datastream.sol/" \
+  --registration-token "<REG_TOKEN>" \
+  --executor "docker" \
+  --docker-image "docker:24" \
+  --description "runner-cloud" \
+  --tag-list "ci,registry" \
+  --run-untagged="true" \
+  --locked="false"
+
+Обеспечить доступ Runner к Registry — хранить токен/ключ безопасно (только token, не логин/пароль).
+
+10.3 .gitlab-ci.yml — пример
+
+stages:
+  - lint
+  - build
+  - scan
+  - sign
+  - push
+
+lint:
+  stage: lint
+  image: node:20
+  script:
+    - npm ci
+    - npm run lint
+
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:dind
+  script:
+    - docker build -t registry.datastream.sol/group/project:$CI_COMMIT_SHORT_SHA .
+
+scan:
+  stage: scan
+  image: aquasec/trivy:latest
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL registry.datastream.sol/group/project:$CI_COMMIT_SHORT_SHA || true
+
+sign:
+  stage: sign
+  image: cosign/cosign:latest
+  script:
+    - cosign sign --key $COSIGN_KEY registry.datastream.sol/group/project:$CI_COMMIT_SHORT_SHA
+
+push:
+  stage: push
+  image: docker:24
+  services:
+    - docker:dind
+  script:
+    - docker push registry.datastream.sol/group/project:$CI_COMMIT_SHORT_SHA
+    - docker tag registry.datastream.sol/group/project:$CI_COMMIT_SHORT_SHA registry.datastream.sol/group/project:latest
+    - docker push registry.datastream.sol/group/project:latest
+
+Требования: сканирование (SAST/DAST/Container Scanning) можно интегрировать через встроенные возможности GitLab или сторонние инструменты (Trivy, Snyk). Подпись имиджа — cosign.
+
+Тегирование: семвер (vMAJOR.MINOR.PATCH), latest, commit-sha.
+
+
+---
+
+11. Проверки и отчётность
+
+1. Список действий и команд, которые вы запускали, сохраняйте в operations.log с временными метками.
+
+
+2. Документируйте все изменения конфигураций (копии /etc/*) и делайте конфигурационные бекапы перед изменениями.
+
+
+3. Еженедельный чек-лист: состояние VPN, тест доставки почты, целостность бэкапов (результат restic check), состояние SSH ключей и логов доступа.
+
+
+
+
+---
+
+12. Полезные ссылки (официальная документация)
+
+FreeIPA Quick Start: https://www.freeipa.org/pa
