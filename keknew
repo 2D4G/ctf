@@ -1,0 +1,1587 @@
+======================================================================
+                 FORENSIC CHEAT SHEET — WORLDSKILLS
+======================================================================
+
+Основная формула:
+
+СТРУКТУРА → ФИЛЬТР → АРТЕФАКТ → ВРЕМЯ → КОРРЕЛЯЦИЯ → ДОКАЗАТЕЛЬСТВО → ОТВЕТ
+
+
+======================================================================
+0. ГЛАВНОЕ ПРАВИЛО
+======================================================================
+
+НИКОГДА не работаем непосредственно с оригиналом доказательства.
+
+Оригиналы:
+~/forensics/evidence/
+
+Рабочие данные:
+~/forensics/work/
+
+Извлечённые файлы:
+~/forensics/exports/
+
+Результаты:
+~/forensics/results/
+
+
+Создаём структуру:
+
+mkdir -p ~/forensics/{evidence,work,pcap,disk,ram,exports,results}
+
+cd ~/forensics
+
+
+Хешируем исходные файлы:
+
+sha256sum evidence/* | tee results/SHA256SUMS.txt
+
+# SHA-256 позволяет доказать, что исходный файл не изменялся.
+
+
+Смотрим, что получили:
+
+ls -lah evidence/
+
+file evidence/*
+
+# file определяет тип файла независимо от расширения.
+
+
+======================================================================
+1. БЫСТРЫЙ TRIAGE ЛЮБОГО ФАЙЛА
+======================================================================
+
+file FILE
+
+# Определяет реальный тип файла.
+
+
+stat FILE
+
+# Размер, время изменения, inode и другие метаданные.
+
+
+sha256sum FILE
+
+# Получаем SHA-256.
+
+
+strings -a -n 6 FILE
+
+# Извлекаем читаемые ASCII-строки.
+
+
+strings -el FILE
+
+# Извлекаем UTF-16LE.
+# Особенно полезно для Windows-файлов.
+
+
+xxd -l 256 FILE
+
+# Показывает первые 256 байт в hex.
+
+
+hexdump -C FILE | head
+
+# Hexdump с ASCII-представлением.
+
+
+exiftool FILE
+
+# Метаданные файла.
+
+
+======================================================================
+2. PCAP — ПЕРВИЧНЫЙ АНАЛИЗ
+======================================================================
+
+Файл:
+
+capture.pcap
+
+
+Информация о PCAP:
+
+capinfos capture.pcap
+
+# Размер
+# количество пакетов
+# начало/конец захвата
+# длительность
+# тип канального уровня
+
+
+Общая статистика протоколов:
+
+tshark -r capture.pcap -q -z io,phs
+
+# Показывает, какие протоколы присутствуют в PCAP.
+
+
+IP conversations:
+
+tshark -r capture.pcap -q -z conv,ip
+
+# Кто с кем общается и сколько данных передано.
+
+
+IP endpoints:
+
+tshark -r capture.pcap -q -z endpoints,ip
+
+# Список IP-адресов, участвующих в трафике.
+
+
+======================================================================
+3. WIRESHARK — ОСНОВНЫЕ DISPLAY FILTERS
+======================================================================
+
+ВАЖНО:
+
+-Y = display filter
+-f = capture filter
+
+Для анализа уже существующего PCAP чаще всего используем -Y.
+
+
+Трафик конкретного IP:
+
+ip.addr == 10.10.10.10
+
+
+Источник:
+
+ip.src == 10.10.10.10
+
+
+Назначение:
+
+ip.dst == 10.10.10.10
+
+
+TCP:
+
+tcp
+
+
+UDP:
+
+udp
+
+
+Порт:
+
+tcp.port == 443
+
+udp.port == 53
+
+
+DNS:
+
+dns
+
+
+HTTP:
+
+http
+
+
+TLS:
+
+tls
+
+
+SSH:
+
+ssh
+
+
+FTP:
+
+ftp
+
+
+HTTP requests:
+
+http.request
+
+
+POST:
+
+http.request.method == "POST"
+
+
+Ошибки HTTP:
+
+http.response.code >= 400
+
+
+DNS query:
+
+dns.qry.name
+
+
+Конкретный TCP stream:
+
+tcp.stream == 5
+
+
+Поиск строки:
+
+frame contains "password"
+
+
+Поиск CTF-флага:
+
+frame contains "RTK{"
+
+
+SYN без ACK:
+
+tcp.flags.syn == 1 && tcp.flags.ack == 0
+
+# Может помочь обнаружить сканирование портов.
+
+
+======================================================================
+4. PCAP — DNS
+======================================================================
+
+Все DNS-запросы:
+
+tshark -r capture.pcap -Y "dns" \
+-T fields \
+-e frame.time \
+-e ip.src \
+-e ip.dst \
+-e dns.qry.name \
+-e dns.a
+
+# Показывает:
+# время
+# источник
+# DNS-сервер
+# домен
+# IP-адрес ответа
+
+
+Уникальные домены:
+
+tshark -r capture.pcap -Y "dns" \
+-T fields -e dns.qry.name | sort -u
+
+
+DNS с сохранением в CSV:
+
+tshark -r capture.pcap -Y "dns" \
+-T fields \
+-e frame.time \
+-e ip.src \
+-e ip.dst \
+-e dns.qry.name \
+-e dns.a \
+-E header=y \
+-E separator=, > results/dns.csv
+
+
+Ищем:
+
+- подозрительные домены
+- длинные поддомены
+- случайные строки
+- DGA
+- C2
+- DNS tunneling
+- TXT-запросы
+- необычно большое количество запросов
+
+
+======================================================================
+5. PCAP — HTTP
+======================================================================
+
+Все HTTP requests:
+
+tshark -r capture.pcap \
+-Y "http.request" \
+-T fields \
+-e frame.time \
+-e ip.src \
+-e ip.dst \
+-e http.host \
+-e http.request.method \
+-e http.request.uri \
+-e http.user_agent
+
+
+Только POST:
+
+tshark -r capture.pcap \
+-Y 'http.request.method == "POST"' \
+-V
+
+
+Ищем:
+
+- username
+- password
+- token
+- cookie
+- upload
+- download
+- command
+- подозрительный User-Agent
+- подозрительные URI
+- webshell
+
+
+Полезный фильтр:
+
+http.request.method == "POST"
+
+http.request.uri contains "login"
+
+http.request.uri contains "upload"
+
+
+======================================================================
+6. PCAP — TLS
+======================================================================
+
+Client Hello:
+
+tshark -r capture.pcap \
+-Y "tls.handshake.type == 1" \
+-T fields \
+-e frame.time \
+-e ip.src \
+-e ip.dst \
+-e tls.handshake.extensions_server_name
+
+
+SNI позволяет увидеть домен, к которому обращается клиент,
+даже если содержимое TLS зашифровано.
+
+
+Ищем:
+
+- подозрительные домены
+- неизвестные внешние серверы
+- C2
+- обращения в подозрительное время
+
+
+======================================================================
+7. TCP STREAM
+======================================================================
+
+Получаем список stream:
+
+tshark -r capture.pcap \
+-Y tcp \
+-T fields \
+-e tcp.stream \
+-e ip.src \
+-e tcp.srcport \
+-e ip.dst \
+-e tcp.dstport | sort -u
+
+
+Посмотреть stream №5:
+
+tshark -r capture.pcap \
+-q -z follow,tcp,ascii,5
+
+
+В Wireshark:
+
+ПКМ по пакету
+→ Follow
+→ TCP Stream
+
+
+Сохраняем stream:
+
+tshark -r capture.pcap \
+-Y "tcp.stream == 5" \
+-w work/stream5.pcap
+
+
+Если обнаружили HTTP:
+
+Wireshark
+→ File
+→ Export Objects
+→ HTTP
+
+
+После извлечения:
+
+file exports/file.bin
+
+sha256sum exports/file.bin
+
+strings -a -n 6 exports/file.bin
+
+
+======================================================================
+8. PCAP — ПОИСК IOCs
+======================================================================
+
+DNS:
+
+tshark -r capture.pcap \
+-Y "dns" \
+-T fields \
+-e dns.qry.name | sort -u
+
+
+HTTP:
+
+tshark -r capture.pcap \
+-Y "http.request" \
+-T fields \
+-e ip.src \
+-e ip.dst \
+-e http.host \
+-e http.request.uri \
+-e http.user_agent | sort -u
+
+
+Частые destination IP:
+
+tshark -r capture.pcap \
+-Y "ip" \
+-T fields \
+-e ip.dst | sort | uniq -c | sort -nr | head
+
+
+Частые destination ports:
+
+tshark -r capture.pcap \
+-Y "tcp" \
+-T fields \
+-e tcp.dstport | sort | uniq -c | sort -nr
+
+
+Ищем флаг:
+
+tshark -r capture.pcap \
+-Y 'frame contains "RTK{"' \
+-V
+
+
+Другие варианты:
+
+tshark -r capture.pcap \
+-Y 'frame contains "FLAG{"' \
+-V
+
+
+tshark -r capture.pcap \
+-Y 'frame contains "password"' \
+-V
+
+
+======================================================================
+9. PCAP — TCPDUMP
+======================================================================
+
+tcpdump -nn -r capture.pcap
+
+# Быстрый просмотр пакетов.
+
+
+Только ICMP:
+
+tcpdump -nn -r capture.pcap icmp
+
+
+Только DNS:
+
+tcpdump -nn -r capture.pcap port 53
+
+
+HTTP:
+
+tcpdump -nn -r capture.pcap port 80
+
+
+Конкретный IP:
+
+tcpdump -nn -r capture.pcap host 10.10.10.10
+
+
+Конкретный порт:
+
+tcpdump -nn -r capture.pcap port 443
+
+
+======================================================================
+10. DISK IMAGE — ПЕРВИЧНЫЙ АНАЛИЗ
+======================================================================
+
+Например:
+
+disk.img
+
+
+Тип:
+
+file disk.img
+
+
+SHA256:
+
+sha256sum disk.img
+
+
+Разметка:
+
+mmls disk.img
+
+# ОЧЕНЬ ВАЖНО.
+# Показывает разделы и их START.
+#
+# START понадобится для:
+# fsstat
+# fls
+# istat
+# icat
+# mount
+
+
+======================================================================
+11. FILESYSTEM
+======================================================================
+
+Допустим mmls показал:
+
+Start = 2048
+
+
+Проверяем filesystem:
+
+fsstat -o 2048 disk.img
+
+
+Список файлов:
+
+fls -o 2048 -r -p disk.img > results/fls.txt
+
+
+Удалённые файлы:
+
+fls -o 2048 -r -d disk.img
+
+
+Ищем интересные файлы:
+
+grep -iE \
+'password|secret|flag|token|key|config|ssh|history' \
+results/fls.txt
+
+
+======================================================================
+12. INODE
+======================================================================
+
+Если нашли интересный inode:
+
+istat -o 2048 disk.img INODE
+
+
+Извлекаем:
+
+icat -o 2048 disk.img INODE > exports/file.bin
+
+
+Проверяем:
+
+file exports/file.bin
+
+sha256sum exports/file.bin
+
+strings -a -n 6 exports/file.bin
+
+
+======================================================================
+13. МОНТИРОВАНИЕ DISK IMAGE
+======================================================================
+
+Создаём mount point:
+
+sudo mkdir -p /mnt/forensic
+
+
+Считаем offset:
+
+OFFSET=$((2048*512))
+
+
+Монтируем ТОЛЬКО READ-ONLY:
+
+sudo mount -o ro,loop,offset=$OFFSET \
+disk.img /mnt/forensic
+
+
+Проверяем:
+
+mount | grep forensic
+
+
+После анализа:
+
+sudo umount /mnt/forensic
+
+
+ВАЖНО:
+
+2048 — это START в секторах.
+
+512 — типичный размер сектора.
+
+Перед использованием убедитесь в параметрах конкретного образа.
+
+
+======================================================================
+14. LINUX FORENSICS
+======================================================================
+
+В первую очередь смотрим:
+
+/etc/passwd
+
+/etc/shadow
+
+/root/.ssh/
+
+/home/*/.ssh/
+
+/etc/crontab
+
+/etc/cron.*
+
+/etc/systemd/system/
+
+/tmp/
+
+/var/tmp/
+
+/dev/shm/
+
+/etc/hosts
+
+
+Логи:
+
+Debian / Ubuntu:
+
+/var/log/auth.log
+
+/var/log/syslog
+
+
+RHEL / CentOS:
+
+/var/log/secure
+
+/var/log/messages
+
+
+systemd:
+
+/var/log/journal/
+
+
+======================================================================
+15. LINUX — АВТОРИЗАЦИЯ
+======================================================================
+
+Ищем успешные SSH-входы:
+
+grep -RniE 'Accepted|session opened' \
+/mnt/forensic/var/log 2>/dev/null
+
+
+Неудачные:
+
+grep -RniE 'Failed password|authentication failure' \
+/mnt/forensic/var/log 2>/dev/null
+
+
+sudo:
+
+grep -Rni 'sudo:' \
+/mnt/forensic/var/log 2>/dev/null
+
+
+Ищем команды/инструменты злоумышленника:
+
+grep -RniE \
+'curl|wget|nc |ncat|bash -c|python|perl|base64|/dev/tcp' \
+/mnt/forensic/etc \
+/mnt/forensic/var \
+2>/dev/null | head -200
+
+
+======================================================================
+16. LINUX — PERSISTENCE
+======================================================================
+
+Cron:
+
+cat /mnt/forensic/etc/crontab
+
+find /mnt/forensic/etc/cron* -type f -ls
+
+
+Systemd:
+
+find /mnt/forensic/etc/systemd \
+-type f -ls 2>/dev/null
+
+
+SSH keys:
+
+find /mnt/forensic \
+-name authorized_keys \
+-o -name id_rsa \
+-o -name id_ed25519 \
+2>/dev/null
+
+
+SUID:
+
+find /mnt/forensic \
+-type f -perm /4000 \
+-ls 2>/dev/null | head -200
+
+
+Исполняемые файлы:
+
+find /mnt/forensic \
+-type f -perm /111 \
+-ls 2>/dev/null | head -200
+
+
+======================================================================
+17. LINUX — ПОДОЗРИТЕЛЬНЫЕ ФАЙЛЫ
+======================================================================
+
+Последние изменённые файлы:
+
+find /mnt/forensic \
+-xdev -type f -mtime -7 -ls \
+2>/dev/null | head -200
+
+
+Большие файлы:
+
+find /mnt/forensic \
+-type f -size +10M \
+-ls 2>/dev/null | head -100
+
+
+Shell scripts:
+
+find /mnt/forensic \
+-type f -name '*.sh' \
+-ls 2>/dev/null
+
+
+Временные каталоги:
+
+find /mnt/forensic/tmp \
+-type f -ls 2>/dev/null
+
+find /mnt/forensic/var/tmp \
+-type f -ls 2>/dev/null
+
+find /mnt/forensic/dev/shm \
+-type f -ls 2>/dev/null
+
+
+======================================================================
+18. WINDOWS FORENSICS
+======================================================================
+
+Основные места:
+
+C:\Windows\System32\winevt\Logs\
+
+C:\Windows\System32\config\
+
+C:\Users\
+
+C:\Windows\Prefetch\
+
+C:\Windows\Tasks\
+
+C:\Windows\System32\Tasks\
+
+
+Ключевые Registry:
+
+NTUSER.DAT
+
+SAM
+
+SYSTEM
+
+SOFTWARE
+
+
+PowerShell history:
+
+C:\Users\<USER>\AppData\Roaming\
+Microsoft\Windows\PowerShell\PSReadLine\
+ConsoleHost_history.txt
+
+
+Ищем:
+
+*.evtx
+
+NTUSER.DAT
+
+SAM
+
+SYSTEM
+
+SOFTWARE
+
+
+Команда:
+
+find /mnt/forensic \
+-iname '*.evtx' \
+-o -iname 'NTUSER.DAT' \
+-o -iname 'SYSTEM' \
+-o -iname 'SOFTWARE' \
+| head -100
+
+
+======================================================================
+19. WINDOWS — EVTX
+======================================================================
+
+Ключевые журналы:
+
+Security.evtx
+
+System.evtx
+
+Microsoft-Windows-PowerShell%4Operational.evtx
+
+Microsoft-Windows-Sysmon%4Operational.evtx
+
+
+Ищем:
+
+4624
+= успешный вход
+
+
+4625
+= неуспешный вход
+
+
+4688
+= создание процесса
+
+
+7045
+= установка службы
+
+
+PowerShell
+= выполнение PowerShell
+
+
+Sysmon:
+
+Event ID 1
+= создание процесса
+
+
+Event ID 3
+= network connection
+
+
+Event ID 11
+= создание файла
+
+
+Event ID 22
+= DNS query
+
+
+======================================================================
+20. WINDOWS — ПОИСК ПОДОЗРИТЕЛЬНОГО
+======================================================================
+
+Ищем:
+
+powershell
+
+cmd.exe
+
+wscript
+
+cscript
+
+rundll32
+
+regsvr32
+
+mshta
+
+certutil
+
+bitsadmin
+
+schtasks
+
+net user
+
+whoami
+
+ipconfig
+
+nltest
+
+netstat
+
+
+Особенно подозрительно:
+
+powershell -enc
+
+powershell -EncodedCommand
+
+IEX
+
+DownloadString
+
+Invoke-WebRequest
+
+curl
+
+wget
+
+certutil -decode
+
+
+======================================================================
+21. TIMELINE
+======================================================================
+
+Создаём timeline:
+
+log2timeline.py \
+results/timeline.plaso \
+/mnt/forensic
+
+
+Конвертируем:
+
+psort.py \
+-o l2tcsv \
+-w results/timeline.csv \
+results/timeline.plaso
+
+
+Ищем PowerShell:
+
+grep -iE \
+'powershell|cmd.exe' \
+results/timeline.csv | head -200
+
+
+Ищем LOLBins:
+
+grep -iE \
+'wscript|cscript|rundll32|regsvr32|mshta|certutil|bitsadmin' \
+results/timeline.csv | head -200
+
+
+======================================================================
+22. TIMELINE — ПРАКТИЧЕСКИЙ ПОДХОД
+======================================================================
+
+Если в PCAP обнаружили:
+
+14:35
+→ подозрительный IP
+→ HTTP POST
+
+
+Не надо изучать весь образ подряд.
+
+
+Смотрим:
+
+14:35 ± 10 минут
+
+
+Проверяем:
+
+- auth.log
+- EVTX
+- PowerShell
+- процессы
+- создание файлов
+- Downloads
+- /tmp
+- cron
+- systemd
+- SSH
+
+
+Если найден подозрительный файл:
+
+→ timestamp
+→ hash
+→ содержимое
+→ процесс
+→ сетевое соединение
+
+
+======================================================================
+23. VOLATILITY 3 — RAM
+======================================================================
+
+Образ:
+
+memory.raw
+
+
+Информация:
+
+vol -f memory.raw windows.info
+
+
+Процессы:
+
+vol -f memory.raw windows.pslist
+
+
+Дерево процессов:
+
+vol -f memory.raw windows.pstree
+
+
+Командные строки:
+
+vol -f memory.raw windows.cmdline
+
+
+Сетевые соединения:
+
+vol -f memory.raw windows.netscan
+
+
+DLL процесса:
+
+vol -f memory.raw \
+windows.dlllist --pid PID
+
+
+Handles:
+
+vol -f memory.raw \
+windows.handles --pid PID
+
+
+Поиск injected code:
+
+vol -f memory.raw windows.malfind
+
+
+Поиск файлов:
+
+vol -f memory.raw windows.filescan
+
+
+Фильтр:
+
+vol -f memory.raw windows.filescan \
+| grep -iE \
+'password|flag|\.exe|\.dll'
+
+
+======================================================================
+24. VOLATILITY — НА ЧТО СМОТРЕТЬ
+======================================================================
+
+Подозрительный процесс:
+
+powershell.exe
+
+cmd.exe
+
+wscript.exe
+
+cscript.exe
+
+rundll32.exe
+
+mshta.exe
+
+regsvr32.exe
+
+
+Особенно интересны:
+
+PID
+
+PPID
+
+CommandLine
+
+Path
+
+User
+
+Start time
+
+Network connection
+
+
+Сравниваем:
+
+pstree
++
+cmdline
++
+netscan
+
+
+Пример:
+
+WINWORD.EXE
+    ↓
+powershell.exe
+    ↓
+cmd.exe
+    ↓
+unknown.exe
+
+
+Такое дерево требует проверки.
+
+
+======================================================================
+25. ПОДОЗРИТЕЛЬНЫЙ BINARY
+======================================================================
+
+НИКОГДА не запускаем неизвестный бинарник
+на основной системе.
+
+
+file suspicious.bin
+
+
+sha256sum suspicious.bin
+
+
+strings -a -n 6 suspicious.bin | less
+
+
+xxd -l 128 suspicious.bin
+
+
+exiftool suspicious.bin
+
+
+binwalk suspicious.bin
+
+
+7z l suspicious.bin
+
+
+YARA:
+
+yara -r rules/ suspicious.bin
+
+
+Ищем:
+
+URL
+
+IP
+
+domain
+
+password
+
+token
+
+API key
+
+command
+
+shell
+
+PowerShell
+
+
+======================================================================
+26. CTF — ПОИСК ФЛАГА
+======================================================================
+
+Обычный поиск:
+
+grep -RniE \
+'RTK\{|FLAG\{|flag\{|password|secret|token|key' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+В binary:
+
+strings -a -n 5 suspicious.bin \
+| grep -Ei \
+'RTK\{|FLAG\{|password|secret|token'
+
+
+В PCAP:
+
+tshark -r capture.pcap \
+-Y 'frame contains "RTK{"' \
+-V
+
+
+Если флаг не найден:
+
+Проверяем:
+
+1. URL encoding
+2. Base64
+3. Hex
+4. gzip
+5. zip
+6. TCP stream
+7. DNS
+8. DNS TXT
+9. HTTP POST
+10. HTTP response
+11. extracted objects
+12. binary payload
+13. XOR
+14. compressed data
+
+
+======================================================================
+27. BASE64
+======================================================================
+
+Распознать:
+
+echo 'SGVsbG8=' | base64 -d
+
+
+Если файл:
+
+base64 -d encoded.txt > decoded.bin
+
+
+После декодирования:
+
+file decoded.bin
+
+strings -a decoded.bin
+
+
+======================================================================
+28. HEX
+======================================================================
+
+Например:
+
+echo '52544b7b' | xxd -r -p
+
+
+Проверяем:
+
+file decoded.bin
+
+strings decoded.bin
+
+
+======================================================================
+29. ZIP / GZIP
+======================================================================
+
+ZIP:
+
+7z l file.zip
+
+
+Распаковать:
+
+7z x file.zip -oexports/
+
+
+GZIP:
+
+file file.gz
+
+
+gunzip file.gz
+
+
+Если неизвестный файл:
+
+file suspicious.bin
+
+binwalk suspicious.bin
+
+
+======================================================================
+30. КОРРЕЛЯЦИЯ PCAP ↔ DISK
+======================================================================
+
+Это ОЧЕНЬ ВАЖНАЯ часть.
+
+
+PCAP:
+
+10.10.10.50
+      ↓
+185.x.x.x
+
+
+На диске:
+
+auth.log
+      ↓
+user login
+
+
+Timeline:
+
+14:32
+      ↓
+login
+
+
+PCAP:
+
+14:35
+      ↓
+connection to 185.x.x.x
+
+
+Disk:
+
+14:36
+      ↓
+new file created
+
+
+Получаем цепочку:
+
+LOGIN
+ ↓
+COMMAND
+ ↓
+DOWNLOAD
+ ↓
+FILE
+ ↓
+EXECUTION
+ ↓
+C2
+
+
+======================================================================
+31. ЧТО КОРРЕЛИРОВАТЬ
+======================================================================
+
+IP:
+
+PCAP IP
+↔
+logs
+↔
+process
+↔
+configuration
+
+
+Domain:
+
+DNS
+↔
+HTTP Host
+↔
+TLS SNI
+↔
+browser
+↔
+logs
+
+
+Time:
+
+PCAP timestamp
+↔
+EVTX
+↔
+auth.log
+↔
+timeline
+
+
+File:
+
+HTTP downloaded file
+↔
+disk file
+↔
+SHA256
+
+
+Process:
+
+Volatility process
+↔
+network connection
+↔
+file
+
+
+User:
+
+SSH login
+↔
+commands
+↔
+processes
+↔
+files
+
+
+======================================================================
+32. СИЛЬНОЕ ДОКАЗАТЕЛЬСТВО
+======================================================================
+
+Не делаем вывод:
+
+"Это вирус, потому что файл называется malware.exe"
+
+
+Лучше:
+
+PCAP:
+IP X.X.X.X → C2
+
+
+↓
+
+
+auth.log:
+successful login from X.X.X.X
+
+
+↓
+
+
+timeline:
+file created at 14:36
+
+
+↓
+
+
+file:
+SHA256 = XXXXX
+
+
+↓
+
+
+Volatility:
+process running
+
+
+↓
+
+
+netscan:
+process connected to X.X.X.X
+
+
+Это уже сильная корреляция.
+
+
+======================================================================
+33. БЫСТРЫЙ ПОИСК ПО ВСЕМУ ОБРАЗУ
+======================================================================
+
+Флаги:
+
+grep -RniE \
+'RTK\{|FLAG\{|flag\{' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+Пароли:
+
+grep -RniE \
+'password|passwd|pwd' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+Secrets:
+
+grep -RniE \
+'secret|token|api[_-]?key' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+IP:
+
+grep -RniE \
+'([0-9]{1,3}\.){3}[0-9]{1,3}' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+URLs:
+
+grep -RniE \
+'https?://' \
+/mnt/forensic 2>/dev/null | head -300
+
+
+======================================================================
+34. ПОЛЕЗНЫЕ LINUX КОМАНДЫ
+======================================================================
+
+find:
+
+find PATH -type f
+
+
+Файлы за последние 7 дней:
+
+find PATH -type f -mtime -7
+
+
+Большие:
+
+find PATH -type f -size +10M
+
+
+Исполняемые:
+
+find PATH -type f -perm /111
+
+
+Shell:
+
+find PATH -type f -name
