@@ -1,0 +1,1219 @@
+====================================================================
+WORLD SKILLS PENTEST CHEATSHEET
+====================================================================
+
+ЦЕЛЬ:
+-----
+Быстро пройти:
+
+SCOPE
+  ↓
+RECON
+  ↓
+PORT SCAN
+  ↓
+SERVICE ENUMERATION
+  ↓
+WEB ENUMERATION
+  ↓
+VULNERABILITY DISCOVERY
+  ↓
+CREDENTIAL DISCOVERY
+  ↓
+INITIAL ACCESS
+  ↓
+PRIVILEGE ESCALATION
+  ↓
+FLAG HUNTING
+
+
+====================================================================
+0. ПОДГОТОВКА
+====================================================================
+
+# Создаем рабочий каталог.
+
+mkdir -p ~/pentest/{recon,nmap,web,smb,ldap,snmp,vuln,creds,loot,flags,notes}
+
+# targets.txt содержит ТОЛЬКО разрешенные IP.
+
+nano ~/pentest/targets.txt
+
+
+Пример:
+
+10.10.10.10
+10.10.10.20
+10.10.10.30
+
+
+# Переходим в каталог.
+
+cd ~/pentest
+
+
+====================================================================
+1. БЫСТРАЯ РАЗВЕДКА
+====================================================================
+
+# Проверка доступности IP.
+
+nmap -sn -iL targets.txt -oA recon/host_discovery
+
+# -sn = host discovery без port scan
+# -iL = взять список IP из файла
+# -oA = сохранить результаты в трех форматах:
+#       .nmap
+#       .xml
+#       .gnmap
+
+
+# Если ICMP блокируется:
+
+nmap -Pn -iL targets.txt -oA recon/hosts_no_ping
+
+# -Pn = считать хост активным, даже если ping не отвечает.
+
+
+====================================================================
+2. БЫСТРЫЙ TCP PORT SCAN
+====================================================================
+
+# Быстро проверить наиболее распространенные TCP-порты.
+
+nmap -Pn --top-ports 1000 -iL targets.txt \
+-oA nmap/top1000
+
+
+# Полный TCP scan всех 65535 портов.
+
+nmap -Pn -p- --min-rate 2000 -iL targets.txt \
+-oA nmap/all_tcp
+
+
+# Если сеть нестабильная — убрать --min-rate.
+
+nmap -Pn -p- -iL targets.txt \
+-oA nmap/all_tcp_safe
+
+
+# -p- = все TCP порты
+# -Pn = не делать ping discovery
+# --min-rate = минимальная скорость отправки пакетов
+
+
+====================================================================
+3. ГЛУБОКОЕ ОПРЕДЕЛЕНИЕ СЕРВИСОВ
+====================================================================
+
+# После обнаружения открытых портов:
+
+nmap -Pn -sC -sV -p- TARGET \
+-oA nmap/TARGET_full
+
+
+# -sC = стандартные безопасные NSE scripts
+# -sV = определение версии сервисов
+
+
+# Определение ОС:
+
+sudo nmap -Pn -O TARGET \
+-oA nmap/TARGET_os
+
+
+# Более глубокий вариант:
+
+sudo nmap -Pn -A TARGET \
+-oA nmap/TARGET_aggressive
+
+
+# -A включает:
+# OS detection
+# version detection
+# scripts
+# traceroute
+
+
+====================================================================
+4. UDP
+====================================================================
+
+# Быстрая проверка популярных UDP:
+
+sudo nmap -Pn -sU --top-ports 100 TARGET \
+-oA nmap/TARGET_udp
+
+
+# Полный UDP scan очень медленный.
+# Использовать только если задание позволяет и есть время:
+
+sudo nmap -Pn -sU TARGET \
+-oA nmap/TARGET_udp_full
+
+
+====================================================================
+5. NSE VULNERABILITY CHECK
+====================================================================
+
+# Базовая проверка уязвимостей:
+
+nmap -Pn --script vuln TARGET \
+-oA vuln/TARGET_nmap_vuln
+
+
+# Более точечно можно запускать scripts:
+
+nmap -Pn --script "default,safe" TARGET
+
+
+# Посмотреть доступные NSE scripts:
+
+ls /usr/share/nmap/scripts/
+
+
+# Поиск конкретного script:
+
+ls /usr/share/nmap/scripts/ | grep smb
+
+
+====================================================================
+6. СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+====================================================================
+
+# Для каждого хоста удобно создавать папку:
+
+mkdir -p loot/TARGET
+
+
+# Пример:
+
+mkdir -p loot/10.10.10.10/{nmap,web,smb,creds,flags}
+
+
+# Всегда сохранять результаты.
+# На чемпионате нельзя рассчитывать на scrollback терминала.
+
+
+====================================================================
+7. HTTP / HTTPS — ПЕРВАЯ ПРОВЕРКА
+====================================================================
+
+# Проверить HTTP headers:
+
+curl -i http://TARGET/
+
+
+# HTTPS с игнорированием проблем сертификата:
+
+curl -k -i https://TARGET/
+
+
+# Только headers:
+
+curl -I http://TARGET/
+
+
+# Следовать redirects:
+
+curl -L -I http://TARGET/
+
+
+# Проверить server header:
+
+curl -I http://TARGET/ | grep -i server
+
+
+# Технологии:
+
+whatweb http://TARGET/
+
+
+# HTTPS:
+
+whatweb https://TARGET/
+
+
+====================================================================
+8. WEB FINGERPRINT
+====================================================================
+
+# Nmap HTTP scripts:
+
+nmap -Pn -p80,443 \
+--script http-title,http-headers,http-methods,http-enum \
+TARGET
+
+
+# HTTP title:
+
+nmap -Pn -p80,443 --script http-title TARGET
+
+
+# HTTP methods:
+
+nmap -Pn -p80,443 --script http-methods TARGET
+
+
+# HTTP enumeration:
+
+nmap -Pn -p80,443 --script http-enum TARGET
+
+
+====================================================================
+9. WEB DIRECTORY ENUMERATION
+====================================================================
+
+# Gobuster:
+
+gobuster dir \
+-u http://TARGET/ \
+-w /usr/share/wordlists/dirb/common.txt \
+-x php,html,txt,bak,old,zip,conf,config,json \
+-o web/TARGET_gobuster.txt
+
+
+# HTTPS:
+
+gobuster dir \
+-u https://TARGET/ \
+-k \
+-w /usr/share/wordlists/dirb/common.txt \
+-x php,html,txt,bak,old,zip,conf,config,json \
+-o web/TARGET_gobuster_https.txt
+
+
+# -k = не проверять TLS certificate
+# -x = расширения файлов
+
+
+====================================================================
+10. FFUF
+====================================================================
+
+# Поиск директорий:
+
+ffuf \
+-u http://TARGET/FUZZ \
+-w /usr/share/wordlists/dirb/common.txt \
+-fs 0 \
+-o web/TARGET_ffuf.json \
+-of json
+
+
+# Расширения:
+
+ffuf \
+-u http://TARGET/FUZZ \
+-w /usr/share/wordlists/dirb/common.txt \
+-e .php,.html,.txt,.bak,.old,.zip,.json,.conf
+
+
+# Важно:
+# Смотреть на STATUS, SIZE, WORDS.
+# Если приложение возвращает одинаковую страницу 200 для
+# несуществующих URL — использовать фильтрацию по размеру.
+
+
+====================================================================
+11. VHOST ENUMERATION
+====================================================================
+
+# Если HTTP работает, но приложение выглядит странно,
+# возможно используется virtual host.
+
+ffuf \
+-u http://TARGET/ \
+-H "Host: FUZZ.TARGET" \
+-w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+-o web/TARGET_vhost.json \
+-of json
+
+
+# Если DNS имя неизвестно:
+# смотреть сертификат HTTPS:
+
+openssl s_client \
+-connect TARGET:443 \
+-servername TARGET \
+< /dev/null 2>/dev/null \
+| openssl x509 -noout -text
+
+
+# Смотреть:
+# Subject
+# Issuer
+# DNS names
+# SAN
+
+
+====================================================================
+12. ROBOTS / SITEMAP / META
+====================================================================
+
+curl -s http://TARGET/robots.txt
+
+curl -s http://TARGET/sitemap.xml
+
+curl -s http://TARGET/.well-known/security.txt
+
+
+# Часто robots.txt раскрывает административные директории.
+
+
+====================================================================
+13. GIT
+====================================================================
+
+# Проверить:
+
+curl -I http://TARGET/.git/
+
+curl -I http://TARGET/.git/HEAD
+
+
+# Если .git доступен:
+
+git-dumper http://TARGET/.git/ loot/TARGET/git
+
+
+# Затем:
+
+cd loot/TARGET/git
+
+git status
+
+git log --oneline
+
+git log -p
+
+git branch -a
+
+
+# Искать секреты:
+
+grep -RniE \
+"password|passwd|secret|token|api[_-]?key|private[_-]?key" .
+
+
+====================================================================
+14. BACKUP FILES
+====================================================================
+
+# Проверять:
+
+/backup
+/backups
+/old
+/dev
+/test
+/tmp
+/archive
+/config
+/.env
+/config.php
+/config.php.bak
+/config.php.old
+/web.config
+/.htaccess
+
+
+# Через curl:
+
+for x in \
+".env" \
+".git/HEAD" \
+"config.php" \
+"config.php.bak" \
+"config.php.old" \
+"backup.zip" \
+"backup.tar.gz" \
+"database.sql" \
+"dump.sql" \
+"web.config"
+do
+    echo "===== $x ====="
+    curl -sk -i "http://TARGET/$x" | head -30
+done
+
+
+====================================================================
+15. NIKTO
+====================================================================
+
+nikto -h http://TARGET \
+-o web/TARGET_nikto.txt
+
+
+# Проверяет:
+# dangerous files
+# outdated software
+# misconfiguration
+# interesting paths
+# HTTP issues
+
+
+====================================================================
+16. WEB PARAMETERS
+====================================================================
+
+# Найти параметры:
+
+curl -s http://TARGET/ | grep -Eo \
+'href="[^"]+|src="[^"]+|action="[^"]+'
+
+
+# Смотреть URL вида:
+
+?id=
+?page=
+?file=
+?path=
+?cmd=
+?url=
+?redirect=
+?next=
+?search=
+?query=
+?user=
+?debug=
+
+
+# Такие параметры становятся кандидатами для:
+# IDOR
+# LFI
+# SSRF
+# SQL injection
+# command injection
+# open redirect
+
+
+====================================================================
+17. SQL INJECTION — БЫСТРАЯ ПРОВЕРКА
+====================================================================
+
+# Если найден параметр:
+
+sqlmap -u "http://TARGET/page.php?id=1" \
+--batch \
+--level=1 \
+--risk=1
+
+
+# Если разрешено заданием и параметр перспективный:
+
+sqlmap -u "http://TARGET/page.php?id=1" \
+--batch \
+--dbs
+
+
+# После нахождения DB:
+
+sqlmap -u "URL" \
+--batch \
+-D DBNAME \
+--tables
+
+
+# Затем:
+
+sqlmap -u "URL" \
+--batch \
+-D DBNAME \
+-T TABLENAME \
+--dump
+
+
+# Не запускать --dump наугад.
+# Сначала понять структуру приложения.
+
+
+====================================================================
+18. LFI
+====================================================================
+
+# Если есть:
+
+?page=
+?file=
+?path=
+?template=
+
+# Проверять в рамках разрешенного задания:
+
+../../../../etc/passwd
+
+../../../../etc/hosts
+
+
+# curl:
+
+curl -sk \
+"http://TARGET/index.php?file=../../../../etc/passwd"
+
+
+====================================================================
+19. SMB
+====================================================================
+
+# Быстрая информация:
+
+nmap -Pn -p139,445 \
+--script smb-os-discovery,smb-protocols \
+TARGET
+
+
+# Список shares:
+
+smbclient -L //TARGET/ -N
+
+
+# -N = без пароля
+
+
+# Подключение к найденному share:
+
+smbclient //TARGET/SHARE -N
+
+
+# Внутри smbclient:
+
+ls
+cd directory
+get file.txt
+mget *
+pwd
+
+
+====================================================================
+20. ENUM4LINUX
+====================================================================
+
+enum4linux-ng -A TARGET
+
+
+# Проверяет:
+# users
+# groups
+# shares
+# domain
+# OS
+# SMB configuration
+
+
+====================================================================
+21. SMBCLIENT С УЧЕТНЫМИ ДАННЫМИ
+====================================================================
+
+smbclient -L //TARGET/ -U USER
+
+
+smbclient //TARGET/SHARE -U USER
+
+
+====================================================================
+22. RPC
+====================================================================
+
+rpcclient -U "" -N TARGET
+
+
+# В rpcclient:
+
+enumdomusers
+enumdomgroups
+querydominfo
+netshareenum
+srvinfo
+
+
+====================================================================
+23. LDAP
+====================================================================
+
+# Проверка LDAP:
+
+nmap -Pn -p389,636 \
+--script ldap-rootdse \
+TARGET
+
+
+# Анонимный bind:
+
+ldapsearch -x \
+-H ldap://TARGET \
+-s base \
+-b ""
+
+
+# Если известен Base DN:
+
+ldapsearch -x \
+-H ldap://TARGET \
+-b "DC=example,DC=local"
+
+
+====================================================================
+24. SNMP
+====================================================================
+
+# Проверить:
+
+nmap -Pn -sU -p161 \
+--script snmp-info \
+TARGET
+
+
+# Популярная community string:
+
+snmpwalk -v2c -c public TARGET
+
+
+# Если public работает:
+
+snmpwalk -v2c -c public TARGET \
+1.3.6.1.2.1
+
+
+# Искать:
+# users
+# interfaces
+# routes
+# processes
+# installed software
+# host information
+
+
+====================================================================
+25. FTP
+====================================================================
+
+# Fingerprint:
+
+nmap -Pn -p21 \
+-sV \
+--script ftp-anon,ftp-syst \
+TARGET
+
+
+# Anonymous:
+
+ftp TARGET
+
+# Username:
+anonymous
+
+# Password:
+anonymous
+
+
+# В FTP:
+
+ls
+get file
+mget *
+pwd
+
+
+====================================================================
+26. SSH
+====================================================================
+
+nmap -Pn -p22 \
+-sV \
+--script ssh2-enum-algos \
+TARGET
+
+
+# Banner:
+
+nc -nv TARGET 22
+
+
+# Если нашли credentials:
+
+ssh USER@TARGET
+
+
+# Не делать bruteforce без необходимости.
+# Сначала использовать найденные credentials.
+
+
+====================================================================
+27. DNS
+====================================================================
+
+# Проверить:
+
+nmap -Pn -p53 \
+-sU -sT \
+--script dns-recursion,dns-service-discovery \
+TARGET
+
+
+# Если есть DNS:
+
+dig @TARGET
+
+
+# AXFR:
+
+dig axfr @TARGET DOMAIN
+
+
+# Пример:
+
+dig axfr @10.10.10.10 example.local
+
+
+# Если разрешено и DNS zone transfer работает,
+# можно получить имена внутренних хостов.
+
+
+====================================================================
+28. MYSQL
+====================================================================
+
+nmap -Pn -p3306 \
+-sV \
+--script mysql-info \
+TARGET
+
+
+# Подключение:
+
+mysql -h TARGET -u USER -p
+
+
+# После доступа:
+
+SHOW DATABASES;
+
+USE database;
+
+SHOW TABLES;
+
+SELECT * FROM users;
+
+
+====================================================================
+29. POSTGRESQL
+====================================================================
+
+nmap -Pn -p5432 -sV TARGET
+
+
+psql -h TARGET -U USER -d DATABASE
+
+
+====================================================================
+30. MSSQL
+====================================================================
+
+nmap -Pn -p1433 \
+-sV \
+--script ms-sql-info \
+TARGET
+
+
+====================================================================
+31. NFS
+====================================================================
+
+# Проверить:
+
+nmap -Pn -p111,2049 \
+--script nfs-showmount \
+TARGET
+
+
+# RPC:
+
+showmount -e TARGET
+
+
+# Если нашли export:
+
+mkdir /tmp/nfs
+
+mount -t nfs TARGET:/export /tmp/nfs
+
+
+# Затем:
+
+find /tmp/nfs -type f -maxdepth 5 -ls
+
+
+====================================================================
+32. RDP
+====================================================================
+
+nmap -Pn -p3389 \
+-sV \
+--script rdp-enum-encryption \
+TARGET
+
+
+# Проверить информацию о RDP:
+
+xfreerdp /v:TARGET /u:USER
+
+
+====================================================================
+33. ПОИСК УЯЗВИМОСТЕЙ ПО ВЕРСИЯМ
+====================================================================
+
+# После nmap получаем:
+
+Apache 2.x
+OpenSSH x.x
+Samba x.x
+Tomcat x.x
+etc.
+
+
+# Ищем локально:
+
+searchsploit "Apache 2.4"
+
+
+searchsploit "Samba 4"
+
+
+searchsploit "OpenSSH"
+
+
+# Полный поиск:
+
+searchsploit -w "PRODUCT VERSION"
+
+
+# -w показывает URL.
+
+
+====================================================================
+34. NUCLEI
+====================================================================
+
+# Если установлен:
+
+nuclei -u http://TARGET
+
+
+# Более широкий scan:
+
+nuclei -u http://TARGET \
+-severity low,medium,high,critical
+
+
+# Для списка:
+
+nuclei -l urls.txt
+
+
+# Результат сохранять:
+
+nuclei -u http://TARGET \
+-o vuln/TARGET_nuclei.txt
+
+
+====================================================================
+35. WEB URL СБОР
+====================================================================
+
+# Если найден сайт — сначала сохранить URLs.
+
+curl -s http://TARGET/ \
+-o web/TARGET_index.html
+
+
+# Затем:
+
+grep -Eo \
+'(href|src)="[^"]+"' \
+web/TARGET_index.html
+
+
+# JS-файлы особенно важны.
+
+grep -Eo \
+'src="[^"]+\.js[^"]*"' \
+web/TARGET_index.html
+
+
+# Скачать интересующий JS:
+
+wget -r -l1 \
+-H -nd -A js \
+http://TARGET/
+
+
+====================================================================
+36. ПОИСК СЕКРЕТОВ
+====================================================================
+
+grep -RniE \
+"password|passwd|passwords|secret|token|apikey|api_key|authorization|bearer" \
+loot/ web/ 2>/dev/null
+
+
+# Поиск приватных ключей:
+
+grep -Rni \
+"BEGIN RSA PRIVATE KEY\|BEGIN OPENSSH PRIVATE KEY" \
+loot/ web/ 2>/dev/null
+
+
+# Поиск флагов:
+
+grep -RniE \
+"flag|FLAG|RTK\{" \
+loot/ web/ smb/ 2>/dev/null
+
+
+====================================================================
+37. ПОЛУЧИЛ SHELL — СРАЗУ
+====================================================================
+
+whoami
+
+id
+
+hostname
+
+uname -a
+
+cat /etc/os-release
+
+ip a
+
+ip route
+
+ss -lntup
+
+ps aux
+
+env
+
+
+====================================================================
+38. LINUX ENUMERATION
+====================================================================
+
+# Пользователи:
+
+cat /etc/passwd
+
+
+# Группы:
+
+cat /etc/group
+
+
+# Sudo:
+
+sudo -l
+
+
+# История:
+
+history
+
+cat ~/.bash_history 2>/dev/null
+
+cat ~/.zsh_history 2>/dev/null
+
+
+# SSH:
+
+ls -la ~/.ssh/
+
+cat ~/.ssh/config 2>/dev/null
+
+cat ~/.ssh/known_hosts 2>/dev/null
+
+
+====================================================================
+39. КОНФИГИ
+====================================================================
+
+# Искать конфигурационные файлы:
+
+find /etc /opt /var/www /home \
+-type f \
+\( -name "*.conf" -o -name "*.config" -o -name ".env" \) \
+2>/dev/null
+
+
+# Секреты:
+
+grep -RniE \
+"password|passwd|secret|token|apikey|api_key" \
+/etc /opt /var/www /home \
+2>/dev/null
+
+
+====================================================================
+40. SUID
+====================================================================
+
+find / -perm -4000 -type f 2>/dev/null
+
+
+# Ищем необычные SUID binary.
+
+
+# Также:
+
+find / -perm -2000 -type f 2>/dev/null
+
+
+====================================================================
+41. CAPABILITIES
+====================================================================
+
+getcap -r / 2>/dev/null
+
+
+# Интересные:
+# cap_setuid
+# cap_dac_override
+# cap_net_raw
+
+
+====================================================================
+42. CRON
+====================================================================
+
+cat /etc/crontab
+
+ls -la /etc/cron.d/
+
+ls -la /etc/cron.daily/
+
+ls -la /etc/cron.hourly/
+
+ls -la /var/spool/cron/ 2>/dev/null
+
+
+====================================================================
+43. RUNNING SERVICES
+====================================================================
+
+systemctl list-units --type=service --state=running
+
+
+# Старые системы:
+
+service --status-all
+
+
+====================================================================
+44. DOCKER
+====================================================================
+
+docker ps
+
+docker images
+
+docker info
+
+
+# Проверить docker socket:
+
+ls -l /var/run/docker.sock
+
+
+====================================================================
+45. ВАЖНЫЕ ДИРЕКТОРИИ
+====================================================================
+
+ls -la /tmp
+
+ls -la /opt
+
+ls -la /var/www
+
+ls -la /srv
+
+ls -la /home
+
+ls -la /root 2>/dev/null
+
+
+====================================================================
+46. ПОИСК FLAG
+====================================================================
+
+# Самый простой:
+
+find / \
+-type f \
+-iname "*flag*" \
+2>/dev/null
+
+
+# По содержимому:
+
+grep -Rni \
+"RTK{" \
+/home /opt /var/www /tmp /srv \
+2>/dev/null
+
+
+# Общий поиск:
+
+grep -RniE \
+"flag|FLAG|RTK\{|WorldSkills|secret" \
+/home /opt /var/www /tmp /srv \
+2>/dev/null
+
+
+# Искать небольшие текстовые файлы:
+
+find /home /opt /var/www /tmp \
+-type f \
+-size -1M \
+-readable \
+2>/dev/null
+
+
+====================================================================
+47. WINDOWS — ПОСЛЕ SHELL
+====================================================================
+
+whoami
+
+hostname
+
+ipconfig /all
+
+route print
+
+net user
+
+net localgroup
+
+net localgroup administrators
+
+tasklist
+
+netstat -ano
+
+
+====================================================================
+48. WINDOWS ПОИСК FLAG
+====================================================================
+
+dir C:\ /s /b *flag* 2>nul
+
+dir C:\Users /s /b *flag* 2>nul
+
+findstr /spin "RTK{" C:\Users\*.* 2>nul
+
+
+====================================================================
+49. WINDOWS CREDENTIAL HUNTING
+====================================================================
+
+# Интересные
