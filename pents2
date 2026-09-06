@@ -1,0 +1,1435 @@
+====================================================================
+WORLD SKILLS — PENTEST BOEVAYA SHPARGALKA
+====================================================================
+Назначение:
+Практический порядок действий при пентесте разрешенных
+организаторами хостов.
+
+ОСНОВНОЙ АЛГОРИТМ:
+
+SCOPE
+  ↓
+HOST DISCOVERY
+  ↓
+PORT DISCOVERY
+  ↓
+SERVICE/VERSION ENUMERATION
+  ↓
+WEB / SMB / DNS / LDAP / SNMP / DB ENUMERATION
+  ↓
+CREDENTIAL / SECRET DISCOVERY
+  ↓
+VULNERABILITY VALIDATION
+  ↓
+INITIAL ACCESS
+  ↓
+LOCAL ENUMERATION
+  ↓
+PRIVILEGE ESCALATION
+  ↓
+FLAG HUNTING
+  ↓
+DOCUMENTATION
+
+ГЛАВНОЕ:
+Не запускать 100 инструментов подряд.
+Каждая найденная информация должна определять следующий шаг.
+
+
+====================================================================
+0. ПЕРВЫЕ 5 МИНУТ — Я ОПРЕДЕЛЯЮ SCOPE
+====================================================================
+
+Я сначала записываю ТОЛЬКО разрешенные IP.
+
+nano targets.txt
+
+Пример:
+
+10.10.10.10
+10.10.10.20
+10.10.10.30
+
+# НЕ добавлять сюда случайные IP из соседних сетей,
+# если они не указаны в задании.
+
+
+Создаю рабочую структуру:
+
+mkdir -p ~/pentest/{recon,nmap,web,smb,ldap,snmp,vuln,creds,loot,flags,notes}
+
+cd ~/pentest
+
+# Проверяю:
+
+pwd
+cat targets.txt
+
+
+====================================================================
+1. HOST DISCOVERY
+====================================================================
+
+МОИ ДЕЙСТВИЯ:
+
+Я сначала выясняю, какие хосты вообще доступны.
+
+nmap -sn -iL targets.txt -oA recon/hosts
+
+
+# -sn = обнаружение хостов без сканирования портов
+# -iL = список целей из файла
+# -oA = сохранить результат в нескольких форматах
+
+
+Если ICMP блокируется:
+
+nmap -Pn -iL targets.txt -oA recon/hosts_pn
+
+
+# -Pn = не полагаться на ping.
+# Считать указанные IP доступными для дальнейшего сканирования.
+
+
+Я записываю:
+
+LIVE:
+10.10.10.10
+10.10.10.20
+
+DEAD/NO RESPONSE:
+10.10.10.30
+
+
+ВАЖНО:
+"Нет ответа на ping" НЕ означает автоматически,
+что хост выключен.
+
+
+====================================================================
+2. БЫСТРАЯ КАРТА ПОРТОВ
+====================================================================
+
+МОИ ДЕЙСТВИЯ:
+
+Для всех разрешенных целей сначала делаю быстрый TCP scan:
+
+nmap -Pn --top-ports 1000 -iL targets.txt \
+-oA nmap/top1000
+
+
+Я смотрю:
+
+22
+21
+23
+25
+53
+80
+110
+111
+135
+139
+143
+389
+443
+445
+1433
+1521
+2049
+3306
+3389
+5432
+5900
+6379
+8080
+8443
+и другие неожиданные порты.
+
+
+====================================================================
+3. ПОЛНЫЙ TCP SCAN
+====================================================================
+
+Теперь я не ограничиваюсь top 1000.
+
+Для каждого интересного хоста:
+
+nmap -Pn -p- TARGET \
+-oA nmap/TARGET_all_tcp
+
+
+# -p- = все TCP-порты 1-65535.
+
+
+Если сеть позволяет и нужно ускориться:
+
+nmap -Pn -p- --min-rate 2000 TARGET \
+-oA nmap/TARGET_all_tcp_fast
+
+
+# --min-rate ускоряет scan.
+# Если появляются потери/странные результаты —
+# убрать --min-rate.
+
+
+МОЯ ЦЕЛЬ:
+Получить ПОЛНЫЙ список TCP-портов.
+
+
+====================================================================
+4. UDP
+====================================================================
+
+Если после TCP нет понятного пути к цели,
+проверяю UDP.
+
+sudo nmap -Pn -sU --top-ports 100 TARGET \
+-oA nmap/TARGET_udp
+
+
+Особенно интересуют:
+
+53   DNS
+67/68 DHCP
+69   TFTP
+123  NTP
+137  NetBIOS
+138  NetBIOS
+161  SNMP
+500  IPsec
+514  syslog
+623  IPMI
+1434 MSSQL
+1900 UPnP
+4500 IPsec
+5353 mDNS
+
+
+Полный UDP scan запускаю только если:
+- задание допускает;
+- осталось достаточно времени;
+- есть смысл.
+
+
+====================================================================
+5. SERVICE ENUMERATION
+====================================================================
+
+Теперь для каждого хоста с интересными портами:
+
+nmap -Pn -sC -sV -p- TARGET \
+-oA nmap/TARGET_services
+
+
+# -sC = стандартные NSE scripts
+# -sV = определение версий
+
+
+Я получаю примерно:
+
+22/tcp  open ssh     OpenSSH 8.x
+80/tcp  open http    Apache 2.4.x
+445/tcp open microsoft-ds Samba x.x
+
+
+И дальше уже работаю НЕ с IP,
+а с конкретными сервисами.
+
+
+====================================================================
+6. OS DETECTION
+====================================================================
+
+Если нужно:
+
+sudo nmap -Pn -O TARGET \
+-oA nmap/TARGET_os
+
+
+Или:
+
+sudo nmap -Pn -A TARGET \
+-oA nmap/TARGET_aggressive
+
+
+# -A включает несколько видов определения:
+# OS
+# versions
+# scripts
+# traceroute
+
+
+Я НЕ начинаю с -A на всех машинах.
+Сначала быстрый scan → потом глубокий.
+
+
+====================================================================
+7. Я СОЗДАЮ КАРТУ ЦЕЛЕЙ
+====================================================================
+
+Для каждого IP создаю заметку:
+
+nano notes/TARGET.txt
+
+
+Пример:
+
+TARGET: 10.10.10.10
+
+OS:
+Linux
+
+PORTS:
+
+22/tcp
+SSH
+OpenSSH x.x
+
+80/tcp
+HTTP
+Apache x.x
+
+445/tcp
+SMB
+Samba x.x
+
+INTERESTING:
+- web application
+- SMB shares
+- possible credentials
+
+NEXT:
+1. HTTP enumeration
+2. SMB enumeration
+3. vulnerability research
+
+
+Это экономит огромное количество времени.
+
+
+====================================================================
+8. МОЙ ПРИОРИТЕТ
+====================================================================
+
+Я обычно иду в таком порядке:
+
+1. Anonymous access
+2. Exposed files/configs
+3. Credentials
+4. Web application
+5. SMB/NFS/FTP
+6. Known vulnerable software
+7. Databases
+8. Misconfiguration
+9. Initial access
+10. Privilege escalation
+
+
+Почему?
+
+Потому что найденный пароль или конфигурационный файл
+часто дает доступ быстрее, чем эксплуатация сложной CVE.
+
+
+====================================================================
+9. HTTP / HTTPS
+====================================================================
+
+ЕСЛИ ВИЖУ:
+
+80
+443
+8000
+8080
+8081
+8443
+3000
+5000
+5001
+
+Я СРАЗУ ИДУ В WEB ENUMERATION.
+
+
+Проверяю:
+
+curl -i http://TARGET/
+
+
+HTTPS:
+
+curl -k -i https://TARGET/
+
+
+Headers:
+
+curl -I http://TARGET/
+
+
+Следование redirect:
+
+curl -L -I http://TARGET/
+
+
+Технологии:
+
+whatweb http://TARGET/
+
+whatweb https://TARGET/
+
+
+Я записываю:
+
+Server:
+Apache/nginx/IIS
+
+Framework:
+PHP
+ASP.NET
+Tomcat
+Django
+Flask
+Node.js
+etc.
+
+Application:
+WordPress
+Joomla
+custom application
+admin panel
+API
+etc.
+
+
+====================================================================
+10. WEB — МОЙ СЛЕДУЮЩИЙ ШАГ
+====================================================================
+
+Проверяю:
+
+curl -sk http://TARGET/robots.txt
+
+curl -sk http://TARGET/sitemap.xml
+
+curl -sk http://TARGET/.well-known/security.txt
+
+
+Потом:
+
+nmap -Pn -p80,443 \
+--script http-title,http-headers,http-methods,http-enum \
+TARGET
+
+
+Ищу:
+
+/admin
+/login
+/dashboard
+/api
+/api/v1
+/dev
+/test
+/debug
+/backup
+/uploads
+/files
+/config
+/server-status
+/phpinfo.php
+
+
+====================================================================
+11. WEB DIRECTORY ENUMERATION
+====================================================================
+
+Запускаю gobuster:
+
+gobuster dir \
+-u http://TARGET/ \
+-w /usr/share/wordlists/dirb/common.txt \
+-x php,html,txt,bak,old,zip,json,conf \
+-o web/TARGET_gobuster.txt
+
+
+HTTPS:
+
+gobuster dir \
+-u https://TARGET/ \
+-k \
+-w /usr/share/wordlists/dirb/common.txt \
+-x php,html,txt,bak,old,zip,json,conf \
+-o web/TARGET_gobuster_https.txt
+
+
+Я смотрю не только STATUS.
+
+ВАЖНЫ:
+
+200
+301
+302
+401
+403
+500
+
+Также смотрю:
+SIZE
+WORDS
+LINES
+
+
+403 особенно интересен.
+
+403 означает:
+"ресурс существует, но доступ запрещен"
+
+Это НЕ означает:
+"ресурс бесполезен".
+
+
+====================================================================
+12. FFUF
+====================================================================
+
+Если gobuster дает мало результатов:
+
+ffuf \
+-u http://TARGET/FUZZ \
+-w /usr/share/wordlists/dirb/common.txt \
+-o web/TARGET_ffuf.json \
+-of json
+
+
+Если есть false positive 200:
+
+сначала:
+
+curl -i http://TARGET/random_nonexistent_page
+
+
+Смотрю размер ответа.
+
+Затем фильтрую по размеру:
+
+ffuf \
+-u http://TARGET/FUZZ \
+-w /usr/share/wordlists/dirb/common.txt \
+-fs SIZE
+
+
+====================================================================
+13. WEB — VHOST
+====================================================================
+
+Если приложение выглядит странно,
+проверяю virtual hosts.
+
+
+Сначала сертификат:
+
+openssl s_client \
+-connect TARGET:443 \
+< /dev/null 2>/dev/null \
+| openssl x509 -noout -text
+
+
+Смотрю:
+
+Subject
+DNS
+SAN
+
+
+Если известно имя домена:
+
+ffuf \
+-u http://TARGET/ \
+-H "Host: FUZZ.example.local" \
+-w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+-o web/TARGET_vhost.json \
+-of json
+
+
+МОЯ ЛОГИКА:
+
+IP
+ ↓
+HTTPS
+ ↓
+certificate
+ ↓
+hostname
+ ↓
+vhost
+ ↓
+другое приложение
+
+
+====================================================================
+14. WEB — SOURCE CODE
+====================================================================
+
+Скачиваю главную страницу:
+
+curl -sk http://TARGET/ \
+-o web/TARGET_index.html
+
+
+Ищу JS:
+
+grep -Eo \
+'src="[^"]+\.js[^"]*"' \
+web/TARGET_index.html
+
+
+Ищу endpoints:
+
+grep -Eo \
+'https?://[^"]+' \
+web/TARGET_index.html
+
+
+Ищу:
+
+api
+token
+password
+secret
+key
+admin
+debug
+internal
+
+
+Особенно внимательно смотрю JavaScript.
+
+
+====================================================================
+15. .GIT
+====================================================================
+
+Проверяю:
+
+curl -I http://TARGET/.git/
+
+curl -I http://TARGET/.git/HEAD
+
+
+Если .git открыт:
+
+git-dumper http://TARGET/.git/ loot/TARGET/git
+
+
+После этого:
+
+cd loot/TARGET/git
+
+git log --oneline
+
+git log -p
+
+git branch -a
+
+
+Ищу секреты:
+
+grep -RniE \
+"password|passwd|secret|token|api[_-]?key|private[_-]?key" \
+.
+
+
+Проверяю старые commits.
+
+ОЧЕНЬ ВАЖНО:
+
+Секрет мог быть удален из текущего файла,
+но остаться в старом git commit.
+
+
+====================================================================
+16. BACKUP / CONFIG
+====================================================================
+
+Я проверяю:
+
+.env
+config.php
+config.php.bak
+config.php.old
+web.config
+database.sql
+dump.sql
+backup.zip
+backup.tar.gz
+old.zip
+site.zip
+
+
+Быстрая проверка:
+
+for x in \
+".env" \
+".git/HEAD" \
+"config.php" \
+"config.php.bak" \
+"config.php.old" \
+"backup.zip" \
+"backup.tar.gz" \
+"database.sql" \
+"dump.sql" \
+"web.config"
+do
+    echo "===== $x ====="
+    curl -sk -i "http://TARGET/$x" | head -30
+done
+
+
+====================================================================
+17. NIKTO
+====================================================================
+
+Запускаю как дополнительный источник:
+
+nikto -h http://TARGET \
+-o web/TARGET_nikto.txt
+
+
+Я НЕ полагаюсь только на Nikto.
+
+Он дополняет:
+- ручной анализ
+- gobuster
+- ffuf
+- nmap
+
+
+====================================================================
+18. WEB PARAMETERS
+====================================================================
+
+Если нахожу:
+
+?id=
+?file=
+?page=
+?path=
+?url=
+?redirect=
+?cmd=
+?search=
+?query=
+?user=
+
+
+Я начинаю думать:
+
+id       → IDOR / SQLi
+file     → LFI
+path     → LFI
+url      → SSRF
+redirect → open redirect
+cmd      → command injection
+query    → SQLi / XSS
+
+
+Сначала ПОНЯТЬ приложение.
+Потом тестировать конкретный параметр.
+
+
+====================================================================
+19. SQL INJECTION
+====================================================================
+
+Если найден перспективный параметр:
+
+sqlmap -u "http://TARGET/page.php?id=1" \
+--batch \
+--level=1 \
+--risk=1
+
+
+Если подтверждена SQLi:
+
+sqlmap -u "URL" \
+--batch \
+--dbs
+
+
+Получить таблицы:
+
+sqlmap -u "URL" \
+--batch \
+-D DATABASE \
+--tables
+
+
+Получить данные конкретной таблицы:
+
+sqlmap -u "URL" \
+--batch \
+-D DATABASE \
+-T users \
+--dump
+
+
+МОЯ ЛОГИКА:
+
+SQLi
+ ↓
+DB
+ ↓
+tables
+ ↓
+users
+ ↓
+password/hash/token
+ ↓
+reuse credentials
+
+
+====================================================================
+20. LFI
+====================================================================
+
+Если есть:
+
+?page=
+?file=
+?path=
+?template=
+
+
+Проверяю:
+
+../../../../etc/passwd
+
+../../../../etc/hosts
+
+
+Например:
+
+curl -sk \
+"http://TARGET/index.php?file=../../../../etc/passwd"
+
+
+Если LFI подтверждается,
+дальше уже исследую, что именно можно прочитать
+в рамках задания.
+
+
+====================================================================
+21. SMB
+====================================================================
+
+ЕСЛИ ВИЖУ:
+
+139
+445
+
+МОЙ ПЛАН:
+
+nmap -Pn -p139,445 \
+--script smb-os-discovery,smb-protocols \
+TARGET
+
+
+Потом:
+
+smbclient -L //TARGET/ -N
+
+
+# -N = anonymous/no password
+
+
+Если shares доступны:
+
+smbclient //TARGET/SHARE -N
+
+
+Внутри:
+
+ls
+cd DIRECTORY
+get FILE
+mget *
+
+
+Я ищу:
+
+backup
+config
+users
+password
+scripts
+documents
+keys
+source code
+flags
+
+
+====================================================================
+22. ENUM4LINUX
+====================================================================
+
+enum4linux-ng -A TARGET
+
+
+Я смотрю:
+
+users
+groups
+shares
+domain
+OS
+SMB configuration
+
+
+После этого проверяю найденные usernames
+в других сервисах.
+
+
+====================================================================
+23. RPC
+====================================================================
+
+rpcclient -U "" -N TARGET
+
+
+Если anonymous RPC разрешен:
+
+enumdomusers
+
+enumdomgroups
+
+querydominfo
+
+netshareenum
+
+srvinfo
+
+
+Найденные usernames сохраняю.
+
+
+====================================================================
+24. FTP
+====================================================================
+
+Если:
+
+21/tcp
+
+Проверяю:
+
+nmap -Pn -p21 \
+-sV \
+--script ftp-anon,ftp-syst \
+TARGET
+
+
+Anonymous:
+
+ftp TARGET
+
+Username:
+anonymous
+
+Password:
+anonymous
+
+
+Если доступ:
+
+ls
+get FILE
+mget *
+
+
+Смотрю особенно:
+
+backup
+config
+web files
+password files
+archives
+
+
+====================================================================
+25. NFS
+====================================================================
+
+Если:
+
+111
+2049
+
+
+Проверяю:
+
+showmount -e TARGET
+
+
+Или:
+
+nmap -Pn -p111,2049 \
+--script nfs-showmount \
+TARGET
+
+
+Если export доступен:
+
+mkdir /tmp/nfs
+
+mount -t nfs TARGET:/EXPORT /tmp/nfs
+
+
+Потом:
+
+find /tmp/nfs -type f -ls
+
+
+Ищу:
+
+SSH keys
+configs
+backups
+users
+scripts
+flags
+
+
+====================================================================
+26. SNMP
+====================================================================
+
+Если:
+
+UDP 161
+
+Проверяю:
+
+nmap -Pn -sU -p161 \
+--script snmp-info \
+TARGET
+
+
+Пробую типичную community string,
+если это допустимо заданием:
+
+snmpwalk -v2c -c public TARGET
+
+
+Если работает:
+
+snmpwalk -v2c -c public TARGET \
+1.3.6.1.2.1
+
+
+Смотрю:
+
+users
+interfaces
+routes
+processes
+software
+host information
+network configuration
+
+
+====================================================================
+27. DNS
+====================================================================
+
+Если 53:
+
+dig @TARGET
+
+
+Если известен domain:
+
+dig axfr @TARGET DOMAIN
+
+
+Если AXFR разрешен,
+это может раскрыть:
+
+web
+dev
+test
+admin
+internal
+mail
+db
+
+
+Я обязательно проверяю найденные hostname.
+
+
+====================================================================
+28. LDAP
+====================================================================
+
+Если:
+
+389
+636
+
+
+Проверяю:
+
+nmap -Pn -p389,636 \
+--script ldap-rootdse \
+TARGET
+
+
+Anonymous:
+
+ldapsearch -x \
+-H ldap://TARGET \
+-s base \
+-b ""
+
+
+Если известен Base DN:
+
+ldapsearch -x \
+-H ldap://TARGET \
+-b "DC=example,DC=local"
+
+
+Ищу:
+
+users
+groups
+computers
+descriptions
+service accounts
+password hints
+
+
+====================================================================
+29. DATABASES
+====================================================================
+
+MYSQL:
+
+nmap -Pn -p3306 \
+-sV \
+--script mysql-info \
+TARGET
+
+
+Если есть credentials:
+
+mysql -h TARGET -u USER -p
+
+
+POSTGRES:
+
+psql -h TARGET -U USER -d DATABASE
+
+
+MSSQL:
+
+nmap -Pn -p1433 \
+-sV \
+--script ms-sql-info \
+TARGET
+
+
+Я НЕ пытаюсь brute-force БД первым делом.
+
+Сначала ищу credentials в:
+
+web config
+.env
+SMB
+FTP
+Git
+backup
+logs
+
+
+====================================================================
+30. RDP
+====================================================================
+
+Если 3389:
+
+nmap -Pn -p3389 \
+-sV \
+--script rdp-enum-encryption \
+TARGET
+
+
+Если уже есть credentials:
+
+xfreerdp /v:TARGET /u:USER
+
+
+Сразу после входа:
+- кто я?
+- какие группы?
+- какие файлы доступны?
+- где пользовательские данные?
+- есть ли flag?
+
+
+====================================================================
+31. ПОИСК УЯЗВИМОСТЕЙ
+====================================================================
+
+После определения версии:
+
+PRODUCT
+VERSION
+OS
+
+Я проверяю:
+
+searchsploit "PRODUCT VERSION"
+
+
+Примеры:
+
+searchsploit "Apache 2.4"
+
+searchsploit "Samba 4"
+
+searchsploit "OpenSSH"
+
+
+Также:
+
+nmap -Pn --script vuln TARGET \
+-oA vuln/TARGET_nmap_vuln
+
+
+МОЯ ЛОГИКА:
+
+НЕ:
+
+"Вот CVE, попробую ее."
+
+
+А:
+
+"У меня Apache X.Y.
+Какие уязвимости существуют именно для X.Y?
+Эксплуатация допустима?
+Что даст эксплуатация?"
+
+
+====================================================================
+32. ЕСЛИ НАШЕЛ CREDENTIALS
+====================================================================
+
+Я создаю:
+
+nano creds/TARGET.txt
+
+
+Формат:
+
+USER:
+PASSWORD:
+SOURCE:
+SERVICE:
+TARGET:
+
+
+Например:
+
+USER: admin
+PASSWORD: ********
+SOURCE: config.php
+SERVICE: web
+TARGET: 10.10.10.10
+
+
+Дальше проверяю reuse:
+
+SSH
+SMB
+FTP
+RDP
+WEB
+DATABASE
+
+
+====================================================================
+33. PASSWORD REUSE
+====================================================================
+
+Если нашли:
+
+user1 / password123
+
+
+Я проверяю:
+
+ssh user1@TARGET
+
+smbclient -L //TARGET/ -U user1
+
+ftp TARGET
+
+RDP
+
+WEB login
+
+
+Особенно внимательно проверяю:
+одинаковый username/password
+на нескольких сервисах.
+
+
+====================================================================
+34. INITIAL ACCESS
+====================================================================
+
+После разведки выбираю самый простой подтвержденный путь:
+
+1. Anonymous access
+2. Exposed credential
+3. Password reuse
+4. Vulnerable application
+5. Misconfiguration
+6. File upload
+7. LFI
+8. SQLi
+9. Command injection
+10. RCE
+
+
+НЕ начинаю с самого сложного.
+
+
+====================================================================
+35. ПОЛУЧИЛ LINUX SHELL
+====================================================================
+
+ПЕРВЫЕ КОМАНДЫ:
+
+whoami
+
+id
+
+hostname
+
+uname -a
+
+cat /etc/os-release
+
+ip a
+
+ip route
+
+ss -lntup
+
+ps aux
+
+env
+
+
+Я сохраняю результаты.
+
+
+====================================================================
+36. LINUX — USERS
+====================================================================
+
+cat /etc/passwd
+
+cat /etc/group
+
+
+Проверяю:
+
+UID 0
+интересные пользователи
+service accounts
+домашние директории
+
+
+====================================================================
+37. LINUX — SUDO
+====================================================================
+
+sudo -l
+
+
+Это ОДНА ИЗ ПЕРВЫХ КОМАНД.
+
+Если пользователь может выполнять
+что-то от root без пароля,
+это потенциальный путь повышения привилегий.
+
+
+====================================================================
+38. LINUX — SSH
+====================================================================
+
+ls -la ~/.ssh/
+
+cat ~/.ssh/config 2>/dev/null
+
+cat ~/.ssh/known_hosts 2>/dev/null
+
+cat ~/.ssh/authorized_keys 2>/dev/null
+
+
+Ищу:
+
+private keys
+other hosts
+usernames
+known infrastructure
+
+
+====================================================================
+39. LINUX — CONFIG / SECRETS
+====================================================================
+
+find /etc /opt /var/www /home \
+-type f \
+\( -name "*.conf" -o -name "*.config" -o -name ".env" \) \
+2>/dev/null
+
+
+Поиск:
+
+grep -RniE \
+"password|passwd|secret|token|apikey|api_key" \
+/etc /opt /var/www /home \
+2>/dev/null
+
+
+====================================================================
+40. LINUX — SUID
+====================================================================
+
+find / -perm -4000 -type f 2>/dev/null
+
+
+Я записываю необычные binary.
+
+
+Не каждая SUID-программа уязвима.
+
+Для найденной binary:
+- определить версию;
+- понять назначение;
+- проверить известные misconfiguration/CVE.
+
+
+====================================================================
+41. LINUX — CAPABILITIES
+====================================================================
+
+getcap -r / 2>/dev/null
+
+
+Особенно интересны:
+
